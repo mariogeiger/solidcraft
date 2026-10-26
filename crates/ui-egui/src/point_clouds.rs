@@ -104,6 +104,19 @@ fn records(c: &PointCloud) -> Records {
     let height = cells.column("height", On::Segment).map(|k| &k.values.0[..]);
     let mut out: [Vec<u8>; 3] = Default::default();
     let mut used = vec![false; c.len()];
+    // Each point's one segment in and one segment out, when it has exactly one of each: a bead
+    // runs through it, and its two segments meet there mitred.
+    let (mut into, mut out_of) = (vec![None; c.len()], vec![None; c.len()]);
+    for ends in cells.segments.0.as_chunks::<2>().0 {
+        let [a, b] = ends.map(|i| i as usize);
+        if let Some(slot) = out_of.get_mut(a) {
+            *slot = if slot.is_none() { Some(Some(b)) } else { Some(None) };
+        }
+        if let Some(slot) = into.get_mut(b) {
+            *slot = if slot.is_none() { Some(Some(a)) } else { Some(None) };
+        }
+    }
+    let through = |links: &[Option<Option<usize>>], at: u32| links.get(at as usize).copied().flatten().flatten().and_then(|k| world.get(k).copied());
     for (kind, on, n) in [(1usize, On::Segment, 2usize), (2, On::Triangle, 3)] {
         let indices = if n == 2 { &cells.segments.0 } else { &cells.triangles.0 };
         let sources = names.map(|name| source(c, name, on));
@@ -125,6 +138,12 @@ fn records(c: &PointCloud) -> Records {
                 })
             });
             if on == On::Segment {
+                let [a, b] = [corners[0], corners[1]];
+                // The point before `a` only when `a` is passed through, not where beads branch.
+                let joined = |at: u32| matches!((into.get(at as usize), out_of.get(at as usize)), (Some(Some(Some(_))), Some(Some(Some(_)))));
+                let before = through(&into, a).filter(|_| joined(a));
+                let after = through(&out_of, b).filter(|_| joined(b));
+                cell.neighbours = [before.unwrap_or(cell.corners[0]), after.unwrap_or(cell.corners[1])];
                 cell.size = [width.and_then(|w| w.get(e)).copied().unwrap_or(0.0), height.and_then(|h| h.get(e)).copied().unwrap_or(0.0)];
             }
             fill(&mut cell, values);

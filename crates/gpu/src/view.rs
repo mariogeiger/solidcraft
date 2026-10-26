@@ -4871,7 +4871,15 @@ mod glass_tests {
         cloud_cell(&mut dots, &Cell { corners: [[5.0, 5.0, 0.0]; 3], rgb: [0, 0, 255], value: [2.0; 3], has: 4, ..Default::default() });
         let mut segments = Vec::new();
         let ends = [[-3.0, -3.0, 0.0], [3.0, -3.0, 0.0], [3.0, -3.0, 0.0]];
-        let bead = Cell { corners: ends, value: [1.0; 3], filtered: [[5.0; 3], [0.0; 3]], size: [0.2, 0.2], rgb: [0, 255, 0], has: 0b101 };
+        let bead = Cell {
+            corners: ends,
+            value: [1.0; 3],
+            filtered: [[5.0; 3], [0.0; 3]],
+            size: [0.2, 0.2],
+            rgb: [0, 255, 0],
+            has: 0b101,
+            ..Default::default()
+        };
         cloud_cell(&mut segments, &bead);
         let style = CloudStyle { mode: ColorMode::Own, range: [0.0, 1.0], filters: [NO_FILTER; 2], point_size: 20.0 };
         let empty = Arc::new(Vec::new());

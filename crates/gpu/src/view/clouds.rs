@@ -51,10 +51,13 @@ pub const NO_FILTER: [f32; 2] = [-f32::MAX, f32::MAX];
 
 /// One element: its corners (a point repeats its own, a segment its second), the coloured value
 /// and the two filtered values at each corner, a bead's width and height (zero: a line), its own
-/// colour, and which of the value and the two filters it has (bits 2, 0 and 1 of `has`).
+/// colour, and which of the value and the two filters it has (bits 2, 0 and 1 of `has`). A
+/// segment also has the points before and after it on its bead (its own ends where it has none),
+/// so that two beads meet in the plane halfway between their directions.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Cell {
     pub corners: [[f32; 3]; 3],
+    pub neighbours: [[f32; 3]; 2],
     pub value: [f32; 3],
     pub filtered: [[f32; 3]; 2],
     pub size: [f32; 2],
@@ -63,11 +66,11 @@ pub struct Cell {
 }
 
 /// Bytes per [`Cell`].
-pub const CELL_SIZE: usize = 84;
+pub const CELL_SIZE: usize = 108;
 
 /// Append a cell's record.
 pub fn cloud_cell(out: &mut Vec<u8>, c: &Cell) {
-    let floats = c.corners.iter().flatten().chain(&c.value).chain(c.filtered.iter().flatten()).chain(&c.size);
+    let floats = c.corners.iter().flatten().chain(c.neighbours.iter().flatten()).chain(&c.value).chain(c.filtered.iter().flatten()).chain(&c.size);
     for v in floats {
         out.extend_from_slice(&v.to_le_bytes());
     }
@@ -76,17 +79,17 @@ pub fn cloud_cell(out: &mut Vec<u8>, c: &Cell) {
 }
 
 fn cell_layout() -> wgpu::VertexBufferLayout<'static> {
-    const A: [wgpu::VertexAttribute; 8] = wgpu::vertex_attr_array![
-        0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Float32x3,
-        4 => Float32x3, 5 => Float32x3, 6 => Float32x2, 7 => Unorm8x4
+    const A: [wgpu::VertexAttribute; 10] = wgpu::vertex_attr_array![
+        0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 8 => Float32x3, 9 => Float32x3,
+        3 => Float32x3, 4 => Float32x3, 5 => Float32x3, 6 => Float32x2, 7 => Unorm8x4
     ];
     wgpu::VertexBufferLayout { array_stride: CELL_SIZE as u64, step_mode: wgpu::VertexStepMode::Instance, attributes: &A }
 }
 
-/// Sides of a bead's cross-section: a stadium's two half-discs as an octagon.
-const SIDES: u32 = 8;
-/// Vertices drawn per dot, segment and triangle.
-const VERTICES: [u32; 3] = [6, SIDES * 6, 3];
+/// Corners of a bead's cross-section: a stadium, each half-disc in four chords.
+const SIDES: u32 = 10;
+/// What each pipeline draws: the records of which kind, and vertices per record.
+const DRAWS: [(usize, u32); 3] = [(0, 6), (1, SIDES * 6), (2, 3)];
 
 /// The uniform a cloud's style is written to, bytes.
 const STYLE_SIZE: u64 = 32;
@@ -196,8 +199,8 @@ impl CloudDraws {
     pub(super) fn paint(&self, pass: &mut wgpu::RenderPass<'_>, pipes: &CloudPipes, tally: &Tally) {
         for u in self.0.values() {
             pass.set_bind_group(1, &u.bind, &[]);
-            for ((batch, pipe), vertices) in u.kinds.iter().zip(&pipes.pipes).zip(VERTICES) {
-                let Some(batch) = batch else { continue };
+            for (pipe, (kind, vertices)) in pipes.pipes.iter().zip(DRAWS) {
+                let Some(Some(batch)) = u.kinds.get(kind) else { continue };
                 pass.set_pipeline(pipe);
                 for (buffer, count) in &batch.parts {
                     pass.set_vertex_buffer(0, buffer.slice(..));

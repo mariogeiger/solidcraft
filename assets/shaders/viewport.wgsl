@@ -712,6 +712,8 @@ struct CIn {
     @location(0) a: vec3<f32>,
     @location(1) b: vec3<f32>,
     @location(2) c: vec3<f32>,
+    @location(8) before: vec3<f32>,
+    @location(9) after: vec3<f32>,
     @location(3) v: vec3<f32>,
     @location(4) f0: vec3<f32>,
     @location(5) f1: vec3<f32>,
@@ -765,46 +767,70 @@ fn vs_cloud_dot(@builtin(vertex_index) vi: u32, i: CIn) -> COut {
 /// The least half-width of a segment on screen, in pixels.
 const MIN_HALF_PX: f32 = 0.75;
 
-@vertex
-fn vs_cloud_segment(@builtin(vertex_index) vi: u32, i: CIn) -> COut {
-    // Side `q` of the bead is a quad between corners `q` and `q + 1` of the cross-section, at
-    // both ends.
-    let sides = 8u;
-    let q = vi / 6u;
-    let k = vi % 6u;
-    var step = array<u32, 6>(0u, 1u, 1u, 0u, 1u, 0u);
-    var end = array<f32, 6>(0.0, 0.0, 1.0, 0.0, 1.0, 1.0);
-    let e = end[k];
-    let theta = 6.2831853 * f32(q + step[k]) / f32(sides);
-    let d = i.b - i.a;
+/// The frame of a bead along `d`: along it, across it level, and up, its height axis.
+fn bead_frame(d: vec3<f32>) -> mat3x3<f32> {
     var t = vec3<f32>(1.0, 0.0, 0.0);
     if (length(d) > 1e-9) { t = d / length(d); }
     var side = cross(vec3<f32>(0.0, 0.0, 1.0), t);
     if (length(side) < 1e-6) { side = vec3<f32>(1.0, 0.0, 0.0); }
     side = normalize(side);
-    let up = cross(t, side);
-    // A stadium: half-discs of the height's radius, the width's rest flat between them.
-    let r = 0.5 * i.size.y;
-    let flat_half = 0.5 * max(i.size.x - i.size.y, 0.0);
-    let cs = cos(theta);
-    let sn = sin(theta);
+    return mat3x3<f32>(t, side, cross(t, side));
+}
+
+/// Corner `j` (0…9) of a bead's cross-section, a stadium: its place across and up, and its
+/// normal. Corners 0…4 go up the right half-disc, 5…9 down the left one, so 4–5 is the flat top
+/// and 9–0 the flat bottom.
+fn stadium(j: u32, size: vec2<f32>) -> vec4<f32> {
+    let k = j % 10u;
+    let right = k < 5u;
+    let a = -1.5707963 + 0.7853982 * f32(k % 5u) + select(3.1415927, 0.0, right);
+    let r = 0.5 * size.y;
+    let flat_half = 0.5 * max(size.x - size.y, 0.0);
+    return vec4<f32>(select(-flat_half, flat_half, right) + r * cos(a), r * sin(a), cos(a), sin(a));
+}
+
+@vertex
+fn vs_cloud_segment(@builtin(vertex_index) vi: u32, i: CIn) -> COut {
+    // Side `q` of the bead is a quad between corners `q` and `q + 1` of the cross-section, at
+    // both ends.
+    let q = vi / 6u;
+    let k = vi % 6u;
+    var step = array<u32, 6>(0u, 1u, 1u, 0u, 1u, 0u);
+    var end = array<f32, 6>(0.0, 0.0, 1.0, 0.0, 1.0, 1.0);
+    let e = end[k];
+    let f = bead_frame(i.b - i.a);
+    let c = stadium(q + step[k], i.size);
     let axis = mix(i.a, i.b, e);
-    let wp = axis + side * (sign(cs) * flat_half + r * cs) + up * (r * sn);
+    // Where it meets the next or the previous bead, the cross-section lies in the plane halfway
+    // between their directions, stretched across to keep its width: both beads end on the same
+    // section. A turn sharper than 120° ends square instead.
+    let other = select(i.a - i.before, i.after - i.b, e > 0.5);
+    var across_dir = f[1];
+    var stretch = 1.0;
+    if (length(other) > 1e-9) {
+        let g = bead_frame(other);
+        let mid = f[1] + g[1];
+        if (length(mid) > 1e-6 && dot(normalize(mid), f[1]) > 0.5) {
+            across_dir = normalize(mid);
+            stretch = 1.0 / dot(across_dir, f[1]);
+        }
+    }
+    let wp = axis + across_dir * (c.x * stretch) + f[2] * c.y;
     let ca = u.vp * vec4<f32>(axis, 1.0);
     let cw = u.vp * vec4<f32>(wp, 1.0);
     let half = u.screen.xy * 0.5;
     let pa = u.vp * vec4<f32>(i.a, 1.0);
     let pb = u.vp * vec4<f32>(i.b, 1.0);
-    var along = (pb.xy / pb.w - pa.xy / pa.w) * half;
+    let along = (pb.xy / pb.w - pa.xy / pa.w) * half;
     var across = vec2<f32>(-along.y, along.x);
     if (length(across) < 1e-6) { across = vec2<f32>(1.0, 0.0); }
     across = normalize(across);
     // At least a pixel and a half across: a bead seen from afar, or a line without size.
     var px = (cw.xy / cw.w - ca.xy / ca.w) * half;
-    if (length(px) < MIN_HALF_PX * abs(cs)) { px = across * cs * MIN_HALF_PX; }
+    if (length(px) < MIN_HALF_PX * abs(c.z)) { px = across * c.z * MIN_HALF_PX; }
     var pos = vec4<f32>((ca.xy / ca.w + px / half) * cw.w, cw.z, cw.w);
     if (behind(ca)) { pos = vec4<f32>(0.0, 0.0, 0.0, -1.0); }
-    let n = select(side * cs + up * sn, vec3<f32>(0.0), i.size.y <= 0.0);
+    let n = select(f[1] * c.z + f[2] * c.w, vec3<f32>(0.0), i.size.y <= 0.0);
     return cloud_out(i, vec3<f32>(1.0 - e, e, 0.0), wp, pos, n);
 }
 
