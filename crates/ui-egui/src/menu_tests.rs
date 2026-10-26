@@ -1337,6 +1337,38 @@ fn appearance_submenu_keyboard_opens_beside_parent_and_left_returns_to_it() {
     assert!(h.app.viewport.context_menu.is_none());
 }
 
+/// The Appearance flyout opened by hovering its row closes once the pointer moves to another
+/// row of the same menu (#6657).
+#[test]
+fn appearance_submenu_closes_when_the_pointer_moves_to_another_row() {
+    use crate::scenario::{Harness, rect_of};
+    let mut h = Harness::new();
+    h.app = sample_app();
+    h.frames(3);
+    let target = Target::Body { name: body(&h.app) };
+    let rows = context_menu::items(&h.app, &target);
+    context_menu::open_for(&mut h.app, pos2(400.0, 180.0), target);
+    h.frames(2);
+    let flyout = "menu:appearance.assign:Aluminum - Satin";
+    h.step(&json!({"move":[10, 10]})).unwrap();
+    h.step(&json!({"move":{"handle":"menu:ui.appearance"}})).unwrap();
+    h.frames(2);
+    assert!(rect_of(flyout).is_some(), "hovering Appearance opens its flyout");
+    let other = rows.iter().find(|i| i.enabled && i.children.is_empty()).unwrap();
+    h.step(&json!({"move":{"handle":format!("menu:{}", other.id)}})).unwrap();
+    h.frames(2);
+    assert!(rect_of(flyout).is_some(), "passing over {} on the way keeps the flyout for a moment", other.label);
+    h.frames(30);
+    assert!(rect_of(flyout).is_none(), "resting on {} closes the Appearance flyout", other.label);
+    assert!(h.app.viewport.context_menu.is_some(), "the menu itself stays open");
+    h.step(&json!({"move":{"handle":"menu:ui.appearance"}})).unwrap();
+    h.frames(2);
+    assert!(rect_of(flyout).is_some(), "hovering Appearance again reopens it");
+    h.step(&json!({"key":"Escape"})).unwrap();
+    assert!(h.app.viewport.context_menu.is_none());
+    assert!(h.app.dialog.is_none(), "closing the flyout runs nothing");
+}
+
 #[test]
 fn narrow_overflow_submenu_keeps_opening_click_and_accepts_the_next_click() {
     use crate::scenario::Harness;

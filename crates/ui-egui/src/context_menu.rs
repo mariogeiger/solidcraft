@@ -202,6 +202,9 @@ pub struct MenuState {
     pub key_row: Option<usize>,
     submenu: Option<usize>,
     submenu_key: Option<usize>,
+    /// When the pointer came to rest on another row while a flyout was open (it closes the
+    /// flyout after [`SUBMENU_CLOSE_DELAY`]).
+    submenu_leave: Option<f64>,
     /// The radial ring is shown (viewport menus).
     pub radial: bool,
     /// The right button is held through the menu: releasing over a direction picks it.
@@ -262,6 +265,9 @@ const DIRS: usize = 8;
 /// Half axes of the ring of radial items.
 const RX: f32 = crate::ui_kit::RADIAL_RADIUS;
 const RY: f32 = crate::ui_kit::RADIAL_RADIUS;
+/// Seconds the pointer rests on another row before an open flyout closes: a path to the flyout
+/// that crosses a neighbouring row keeps it open.
+const SUBMENU_CLOSE_DELAY: f64 = 0.3;
 
 // ---------------------------------------------------------------------------------------------
 // What the menus offer
@@ -1678,6 +1684,7 @@ pub fn open_for(app: &mut SolveApp, at: Pos2, target: Target) {
     app.menu.key_row = None;
     app.menu.submenu = None;
     app.menu.submenu_key = None;
+    app.menu.submenu_leave = None;
     app.menu.radial = target == Target::Viewport && app.preferences.radial_context_menu;
     app.menu.target = target;
     app.menu.flick = false;
@@ -1937,6 +1944,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         app.menu.submenu_key = None;
     }
     let mut submenu_row = None;
+    let mut other_row = false;
     let key_row = app.menu.key_row;
     let resp = Container::new(ctx, Surface::Popup)
         .area(egui::Id::new("sc_context_menu"))
@@ -1949,10 +1957,14 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
             } else {
                 menu_frame(ui, |ui| {
                     for (k, item) in list.iter().enumerate() {
-                        if item.children.is_empty() {
-                            if let Some(p) = list_row_lit(ui, item, key_row == Some(k)) {
-                                picked = Some(p);
+                        if item.is_sep() || item.is_heading() {
+                            let _ = list_row_lit(ui, item, false);
+                        } else if item.children.is_empty() {
+                            let row = kit_item(item, key_row == Some(k)).show(ui);
+                            if row.clicked() && item.enabled {
+                                picked = Some(item.clone());
                             }
+                            other_row |= row.hovered();
                         } else {
                             let row = kit_item(item, key_row == Some(k) || app.menu.submenu == Some(k)).show(ui);
                             if item.enabled && ((row.hovered() && ctx.input(|i| i.pointer.delta() != Vec2::ZERO)) || row.clicked()) {
@@ -1970,6 +1982,25 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
             }
         });
     inside |= resp.response.contains_pointer() || resp.response.rect.contains(pointer.unwrap_or(Pos2::ZERO));
+
+    // A flyout closes once the pointer moves on to another row of its menu and rests there
+    // (#6657). A pointer that is still (the flyout opened with the keys) leaves it open.
+    let moved = ctx.input(|i| i.pointer.delta() != Vec2::ZERO);
+    if app.menu.submenu.is_some() && other_row && (moved || app.menu.submenu_leave.is_some()) {
+        let now = ctx.input(|i| i.time);
+        let since = *app.menu.submenu_leave.get_or_insert(now);
+        let left = SUBMENU_CLOSE_DELAY - (now - since);
+        if left <= 0.0 || !left.is_finite() {
+            app.menu.submenu = None;
+            app.menu.submenu_key = None;
+            app.menu.submenu_leave = None;
+            submenu_row = None;
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(left));
+        }
+    } else {
+        app.menu.submenu_leave = None;
+    }
 
     if let Some((k, row)) = submenu_row
         && let Some(parent) = list.get(k)
