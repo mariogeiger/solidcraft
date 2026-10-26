@@ -276,6 +276,12 @@ pub(crate) fn owns_pointer(app: &SolveApp, proj: &Proj, p: Pos2) -> bool {
     // The triad only registers an egui hit widget after a handle is under the pointer.
     // Test its geometry before navigation, including the first frame entering a handle.
     app.dialog.as_ref().and_then(|d| crate::dialogs_move::triad(app, d)).is_some_and(|t| crate::gizmo::contains_pointer(proj, &t, p))
+        || app
+            .dialog
+            .as_ref()
+            .and_then(|d| move_rotation(app, d, proj))
+            .and_then(|r| proj.to_screen(r.point(r.angle)))
+            .is_some_and(|end| egui::Rect::from_center_size(end, vec2(20.0, 20.0)).contains(p))
         || (app.dialog.is_none()
             && app.tool.is_none()
             && crate::browser::occurrence_triad_model(app).is_some_and(|t| crate::gizmo::contains_pointer(proj, &t, p)))
@@ -318,9 +324,11 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui, painter: &egui::Painter, proj
             dragging = true;
         }
         // Read the triad again after the drag, so the box follows it in the same frame. Move
-        // types with no triad (Rotate, Point to Point, Point to Position) put the box on the
-        // picked bodies instead.
+        // types with no triad put the box on the picked bodies, or beside Rotate's handle
+        // once an axis is selected.
         let triad = crate::dialogs_move::triad(app, &d);
+        let rotation = draw_move_rotation(app, ui, painter, proj, &mut d);
+        dragging |= rotation.is_some_and(|(_, changed)| changed);
         let at = triad.map(|t| t.center).or_else(|| anchor(app, &d).map(|(base, _)| base));
         // Tab and Shift+Tab in the box show the next or previous value (Y after X; #4776),
         // keeping the keyboard in the box.
@@ -340,7 +348,8 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui, painter: &egui::Painter, proj
             // Clear of the triad: its arrows reach LEN_PX and its rings RING of that, so a box
             // beside the centre would cover the handles the user is reaching for.
             let off = if triad.is_some() { vec2(crate::gizmo::LEN_PX as f32 + 16.0, -12.0) } else { vec2(16.0, -30.0) };
-            value_box_with(ui, label, value, bs + off, focus || dragging, true);
+            let box_at = rotation.map_or(bs + off, |(end, _)| end + vec2(16.0, -12.0));
+            value_box_with(ui, label, value, box_at, focus || dragging, true);
         }
         app.dialog = Some(d);
         return;
@@ -353,6 +362,59 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui, painter: &egui::Painter, proj
     app.dialog = Some(d);
     // A Single hole's handles, over the depth arrow's stem: a press on a hole moves it.
     crate::hole_place::show(app, ui, painter, proj);
+}
+
+struct MoveRotation {
+    centre: Vec3,
+    axis: Vec3,
+    radius: f64,
+    angle: f64,
+}
+
+impl MoveRotation {
+    fn point(&self, angle: f64) -> Vec3 {
+        let e1 = self.axis.any_perp();
+        let e2 = self.axis.cross(e1);
+        self.centre + (e1 * angle.cos() + e2 * angle.sin()) * self.radius
+    }
+}
+
+fn move_rotation(app: &SolveApp, d: &Dialog, proj: &Proj) -> Option<MoveRotation> {
+    let Kind::Move { angle, .. } = &d.kind else { return None };
+    let (centre, axis) = crate::dialogs_move::rotation_axis(app, d)?;
+    let angle = crate::length_input::eval(&app.session.doc, angle, ValueKind::Angle).ok().filter(|a| a.is_finite()).unwrap_or(0.0);
+    Some(MoveRotation { centre, axis, radius: crate::gizmo::ring_radius(proj, centre)?, angle })
+}
+
+/// Reuse the angular handle's snapping and edge-on projection for Move's selected axis.
+fn draw_move_rotation(app: &SolveApp, ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj, d: &mut Dialog) -> Option<(Pos2, bool)> {
+    let r = move_rotation(app, d, proj)?;
+    let points: Vec<_> = (0..=64).filter_map(|i| proj.to_screen(r.point(i as f64 / 64.0 * std::f64::consts::TAU))).collect();
+    painter.add(egui::Shape::line(points, Stroke::new(1.8, Tokens::get().manipulator)));
+    let Kind::Move { angle, .. } = &mut d.kind else { return None };
+    let before = angle.clone();
+    let e1 = r.axis.any_perp();
+    // Keep full turns in the expression while the shared handle works near zero.
+    let boundary = r.angle % std::f64::consts::TAU;
+    let offset = r.angle - boundary;
+    let span = 2.0 * std::f64::consts::TAU;
+    let end = rotation_handle(
+        ui,
+        painter,
+        proj,
+        r.centre,
+        e1,
+        r.axis.cross(e1),
+        r.axis,
+        r.radius,
+        boundary,
+        1.0,
+        offset,
+        (offset - span, offset + span),
+        "move_rotate",
+        angle,
+    )?;
+    Some((end, *angle != before))
 }
 
 /// A round step for dragged values at this zoom (1, 2 or 5 times a power of ten).

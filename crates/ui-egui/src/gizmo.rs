@@ -228,6 +228,11 @@ fn mm_per_px(proj: &Proj, c: Vec3) -> Option<f64> {
     (px > 1e-9).then(|| 1.0 / px)
 }
 
+/// Radius shared by the triad rings and the selected-axis Rotate handle.
+pub(crate) fn ring_radius(proj: &Proj, centre: Vec3) -> Option<f64> {
+    Some(mm_per_px(proj, centre)? * LEN_PX * RING)
+}
+
 fn snap(v: f64, step: f64, free: bool) -> f64 {
     if free || step <= 0.0 { v } else { (v / step).round() * step }
 }

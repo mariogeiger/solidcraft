@@ -252,6 +252,17 @@ pub fn triad(app: &SolveApp, d: &Dialog) -> Option<gizmo::Triad> {
     Some(gizmo::Triad { center: pivot(app, d)? + t, translate: true, rotate: *mode == FREE })
 }
 
+/// Rotate's ring lies on the selected axis, level with the picked bodies' centre.
+pub(crate) fn rotation_axis(app: &SolveApp, d: &Dialog) -> Option<(Vec3, Vec3)> {
+    if !matches!(d.kind, Kind::Move { mode: ROTATE, .. }) {
+        return None;
+    }
+    let centre = bodies_center(app, d)?;
+    let (origin, axis) = axis_line(app, items(d, 1).first()?)?;
+    let axis = axis.normalized()?;
+    Some((origin + axis * (centre - origin).dot(axis), axis))
+}
+
 /// Apply a triad drag to the dialog's values (added to the values when the drag began).
 /// Which value the canvas box shows and types into, for the types that translate: X, Y or Z
 /// (0 to 2), or, in Free Move, the angle about X, Y or Z (3 to 5). Kept in `extra` as
