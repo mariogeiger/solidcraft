@@ -88,8 +88,25 @@ fn cell_layout() -> wgpu::VertexBufferLayout<'static> {
 
 /// Corners of a bead's cross-section: a stadium, each half-disc in four chords.
 const SIDES: u32 = 10;
-/// What each pipeline draws: the records of which kind, and vertices per record.
-const DRAWS: [(usize, u32); 3] = [(0, 6), (1, SIDES * 6), (2, 3)];
+/// What each pipeline draws: the records of which kind, and vertices per record. A bead's are
+/// indexed into its [`SIDES`] corners at each end, so each is worked out once: its sides, then
+/// its two ends closed by fans of triangles.
+const DRAWS: [(usize, u32); 3] = [(0, 6), (1, SIDES * 6 + 2 * (SIDES - 2) * 3), (2, 3)];
+
+/// The bead as indices into its corners: corner `j` at its start is `j`, at its end `SIDES + j`.
+/// Side `q` is the quad between corners `q` and `q + 1` at both ends. The corners turn
+/// counter-clockwise seen from ahead, so every triangle turns counter-clockwise seen from
+/// outside: the inside faces away and is not drawn.
+fn bead_indices() -> Vec<u16> {
+    let n = SIDES as u16;
+    let sides = (0..n).flat_map(|q| {
+        let r = (q + 1) % n;
+        [q, r, n + r, q, n + r, n + q]
+    });
+    let start = (1..n - 1).flat_map(|j| [0, j + 1, j]);
+    let end = (1..n - 1).flat_map(move |j| [n, n + j, n + j + 1]);
+    sides.chain(start).chain(end).collect()
+}
 
 /// The uniform a cloud's style is written to, bytes.
 const STYLE_SIZE: u64 = 32;
@@ -112,6 +129,7 @@ fn style_bytes(s: &CloudStyle) -> [u8; STYLE_SIZE as usize] {
 pub(super) struct CloudPipes {
     layout: wgpu::BindGroupLayout,
     pipes: [wgpu::RenderPipeline; 3],
+    bead: wgpu::Buffer,
 }
 
 impl CloudPipes {
@@ -136,12 +154,12 @@ impl CloudPipes {
             bind_group_layouts: &[Some(viewport), Some(&layout)],
             immediate_size: 0,
         });
-        let pipe = |vs: &str| {
+        let pipe = |vs: &str, cull: Option<wgpu::Face>| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(vs),
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState { module, entry_point: Some(vs), buffers: &[Some(cell_layout())], compilation_options: Default::default() },
-                primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
+                primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: cull, ..Default::default() },
                 depth_stencil: depth.clone(),
                 multisample: wgpu::MultisampleState { count: target.samples.max(1), mask: !0, alpha_to_coverage_enabled: false },
                 fragment: Some(wgpu::FragmentState {
@@ -154,7 +172,16 @@ impl CloudPipes {
                 cache: None,
             })
         };
-        CloudPipes { pipes: [pipe("vs_cloud_dot"), pipe("vs_cloud_segment"), pipe("vs_cloud_triangle")], layout }
+        let indices: Vec<u8> = bead_indices().iter().flat_map(|i| i.to_le_bytes()).collect();
+        let bead = wgpu::util::DeviceExt::create_buffer_init(
+            device,
+            &wgpu::util::BufferInitDescriptor { label: Some("sc_cloud_bead"), contents: &indices, usage: wgpu::BufferUsages::INDEX },
+        );
+        CloudPipes {
+            pipes: [pipe("vs_cloud_dot", None), pipe("vs_cloud_segment", Some(wgpu::Face::Back)), pipe("vs_cloud_triangle", None)],
+            layout,
+            bead,
+        }
     }
 }
 
@@ -204,7 +231,12 @@ impl CloudDraws {
                 pass.set_pipeline(pipe);
                 for (buffer, count) in &batch.parts {
                     pass.set_vertex_buffer(0, buffer.slice(..));
-                    pass.draw(0..vertices, 0..*count);
+                    if kind == 1 {
+                        pass.set_index_buffer(pipes.bead.slice(..), wgpu::IndexFormat::Uint16);
+                        pass.draw_indexed(0..vertices, 0, 0..*count);
+                    } else {
+                        pass.draw(0..vertices, 0..*count);
+                    }
                     tally.triangles(vertices, *count);
                 }
             }

@@ -789,17 +789,25 @@ fn stadium(j: u32, size: vec2<f32>) -> vec4<f32> {
     return vec4<f32>(select(-flat_half, flat_half, right) + r * cos(a), r * sin(a), cos(a), sin(a));
 }
 
+/// Whether a filter leaves out the whole element: all its values on one side of the range.
+fn filtered_out(i: CIn) -> bool {
+    let f = cloud.ranges;
+    let has = u32(round(i.rgb.a * 255.0));
+    let below0 = all(vec3<f32>(i.f0) < vec3<f32>(f.x)) || all(vec3<f32>(i.f0) > vec3<f32>(f.y));
+    let below1 = all(vec3<f32>(i.f1) < vec3<f32>(f.z)) || all(vec3<f32>(i.f1) > vec3<f32>(f.w));
+    return ((has & 1u) != 0u && below0) || ((has & 2u) != 0u && below1);
+}
+
 @vertex
 fn vs_cloud_segment(@builtin(vertex_index) vi: u32, i: CIn) -> COut {
-    // Side `q` of the bead is a quad between corners `q` and `q + 1` of the cross-section, at
-    // both ends.
-    let q = vi / 6u;
-    let k = vi % 6u;
-    var step = array<u32, 6>(0u, 1u, 1u, 0u, 1u, 0u);
-    var end = array<f32, 6>(0.0, 0.0, 1.0, 0.0, 1.0, 1.0);
-    let e = end[k];
+    // Corner `vi % 10` of the cross-section at the start (`vi < 10`) or the end; the index
+    // buffer joins them into the bead's sides.
+    if (filtered_out(i)) {
+        return cloud_out(i, vec3<f32>(1.0, 0.0, 0.0), i.a, vec4<f32>(0.0, 0.0, 0.0, -1.0), vec3<f32>(0.0));
+    }
+    let e = select(0.0, 1.0, vi >= 10u);
     let f = bead_frame(i.b - i.a);
-    let c = stadium(q + step[k], i.size);
+    let c = stadium(vi % 10u, i.size);
     let axis = mix(i.a, i.b, e);
     // Where it meets the next or the previous bead, the cross-section lies in the plane halfway
     // between their directions, stretched across to keep its width: both beads end on the same
