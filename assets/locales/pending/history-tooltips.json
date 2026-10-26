@@ -1,0 +1,23 @@
+{
+  "en": {
+    "timeline.delete_folders_tip": "Keep their features and nested folders in the history",
+    "timeline.feature_error": "Error: {message}",
+    "timeline.feature_warning": "Warning: {message}"
+  },
+  "es": {
+    "timeline.delete_folders_tip": "Conservar sus operaciones y carpetas anidadas en el historial",
+    "timeline.feature_error": "Error: {message}",
+    "timeline.feature_warning": "Advertencia: {message}",
+    "ui.history_marker_tip": "Marcador del historial: arrastra para retroceder el modelo; las nuevas operaciones se insertan aquí"
+  },
+  "ja": {
+    "timeline.delete_folders_tip": "フィーチャーと入れ子のフォルダーを履歴に残します",
+    "timeline.feature_error": "エラー: {message}",
+    "timeline.feature_warning": "警告: {message}"
+  },
+  "zh": {
+    "timeline.delete_folders_tip": "在历史记录中保留其中的特征和嵌套文件夹",
+    "timeline.feature_error": "错误：{message}",
+    "timeline.feature_warning": "警告：{message}"
+  }
+}
