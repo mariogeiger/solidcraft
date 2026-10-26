@@ -136,6 +136,8 @@ pub(crate) struct Header {
     pub(crate) encoding: Encoding,
     pub(crate) elements: Vec<Element>,
     pub(crate) body: usize,
+    /// The text of the `comment` lines.
+    pub(crate) comments: Vec<String>,
 }
 
 /// Does `bytes` start like a PLY file?
@@ -163,7 +165,12 @@ pub(crate) fn header(bytes: &[u8]) -> Result<Header> {
     let text = String::from_utf8_lossy(head.get(..end).unwrap_or_default());
     let mut encoding = None;
     let mut elements: Vec<Element> = Vec::new();
+    let mut comments = Vec::new();
     for line in text.split(['\n', '\r']).skip(1) {
+        if let Some(c) = line.strip_prefix("comment ") {
+            comments.push(c.trim().to_string());
+            continue;
+        }
         let mut it = line.split_whitespace();
         match it.next() {
             Some("format") => {
@@ -206,7 +213,7 @@ pub(crate) fn header(bytes: &[u8]) -> Result<Header> {
         }
     }
     let encoding = encoding.ok_or_else(|| invalid("no `format` line"))?;
-    Ok(Header { encoding, elements, body })
+    Ok(Header { encoding, elements, body, comments })
 }
 
 /// A row's values, read one after another.

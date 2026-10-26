@@ -28,10 +28,25 @@ pub struct CloudStyle {
     pub mode: ColorMode,
     /// The ramp's range of values.
     pub range: [f32; 2],
-    /// An element is shown where its two filtered values lie in these ranges (ends included).
-    pub filters: [[f32; 2]; 2],
+    /// An element is shown where every filter keeps its filtered value.
+    pub filters: [CloudFilter; FILTERS],
     /// A dot's size on screen, in pixels.
     pub point_size: f32,
+}
+
+/// Filters the GPU applies at once.
+pub const FILTERS: usize = 4;
+
+/// The values a filter keeps.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum CloudFilter {
+    /// All of them.
+    #[default]
+    Off,
+    /// Those within a range, ends included.
+    Range([f32; 2]),
+    /// Whole values `offset + i` for each bit `i` set in `mask`.
+    Values { offset: i32, mask: u32 },
 }
 
 /// Where an element's colour comes from.
@@ -46,12 +61,9 @@ pub enum ColorMode {
     Palette,
 }
 
-/// A filter range that shows everything.
-pub const NO_FILTER: [f32; 2] = [-f32::MAX, f32::MAX];
-
 /// One element: its corners (a point repeats its own, a segment its second), the coloured value
-/// and the two filtered values at each corner, a bead's width and height (zero: a line), its own
-/// colour, and which of the value and the two filters it has (bits 2, 0 and 1 of `has`). A
+/// and the four filtered values at each corner, a bead's width and height (zero: a line), its own
+/// colour, and which of the four filters and the value it has (bits 0 to 3, and 4, of `has`). A
 /// segment also has the points before and after it on its bead (its own ends where it has none),
 /// so that two beads meet in the plane halfway between their directions.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -59,14 +71,14 @@ pub struct Cell {
     pub corners: [[f32; 3]; 3],
     pub neighbours: [[f32; 3]; 2],
     pub value: [f32; 3],
-    pub filtered: [[f32; 3]; 2],
+    pub filtered: [[f32; 3]; FILTERS],
     pub size: [f32; 2],
     pub rgb: [u8; 3],
     pub has: u8,
 }
 
 /// Bytes per [`Cell`].
-pub const CELL_SIZE: usize = 108;
+pub const CELL_SIZE: usize = 132;
 
 /// Append a cell's record.
 pub fn cloud_cell(out: &mut Vec<u8>, c: &Cell) {
@@ -79,9 +91,10 @@ pub fn cloud_cell(out: &mut Vec<u8>, c: &Cell) {
 }
 
 fn cell_layout() -> wgpu::VertexBufferLayout<'static> {
-    const A: [wgpu::VertexAttribute; 10] = wgpu::vertex_attr_array![
+    const A: [wgpu::VertexAttribute; 12] = wgpu::vertex_attr_array![
         0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 8 => Float32x3, 9 => Float32x3,
-        3 => Float32x3, 4 => Float32x3, 5 => Float32x3, 6 => Float32x2, 7 => Unorm8x4
+        3 => Float32x3, 4 => Float32x3, 5 => Float32x3, 10 => Float32x3, 11 => Float32x3,
+        6 => Float32x2, 7 => Unorm8x4
     ];
     wgpu::VertexBufferLayout { array_stride: CELL_SIZE as u64, step_mode: wgpu::VertexStepMode::Instance, attributes: &A }
 }
@@ -108,19 +121,27 @@ fn bead_indices() -> Vec<u16> {
     sides.chain(start).chain(end).collect()
 }
 
-/// The uniform a cloud's style is written to, bytes.
-const STYLE_SIZE: u64 = 32;
+/// The uniform a cloud's style is written to, bytes: the colouring, then a `vec4` per filter.
+const STYLE_SIZE: u64 = 16 + 16 * FILTERS as u64;
 
 fn style_bytes(s: &CloudStyle) -> [u8; STYLE_SIZE as usize] {
     let mode = match s.mode {
-        ColorMode::Own => 0.0,
+        ColorMode::Own => 0.0f32,
         ColorMode::Ramp => 1.0,
         ColorMode::Palette => 2.0,
     };
-    let v = [mode, s.point_size, s.range[0], s.range[1], s.filters[0][0], s.filters[0][1], s.filters[1][0], s.filters[1][1]];
+    let mut words = vec![mode.to_bits(), s.point_size.to_bits(), s.range[0].to_bits(), s.range[1].to_bits()];
+    for f in &s.filters {
+        // Kind, then a range's ends, or the first value and the mask of those kept.
+        words.extend(match *f {
+            CloudFilter::Off => [0.0f32.to_bits(), 0, 0, 0],
+            CloudFilter::Range([lo, hi]) => [1.0f32.to_bits(), lo.to_bits(), hi.to_bits(), 0],
+            CloudFilter::Values { offset, mask } => [2.0f32.to_bits(), (offset as f32).to_bits(), 0, mask],
+        });
+    }
     let mut out = [0u8; STYLE_SIZE as usize];
-    for (o, x) in out.as_chunks_mut::<4>().0.iter_mut().zip(v) {
-        *o = f32::to_le_bytes(x);
+    for (o, w) in out.as_chunks_mut::<4>().0.iter_mut().zip(words) {
+        *o = w.to_le_bytes();
     }
     out
 }

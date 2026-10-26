@@ -2,10 +2,11 @@
 //! properties, and the `edge` and `face` elements as segments and triangles (a face as a fan)
 //! with theirs. Positions are `x`, `y`, `z` and colours `red`, `green`, `blue`; every other
 //! scalar property becomes a column named as in the file, whole-numbered when its type is an
-//! integer. A file with edges or faces is read whole, since thinning its vertices would cut
-//! them; a file of points alone keeps every `stride`th vertex.
+//! integer. A comment `property: 0 name, 1 name` names the values of a whole-numbered property.
+//! A file with edges or faces is read whole, since thinning its vertices would cut them; a file
+//! of points alone keeps every `stride`th vertex.
 
-use solidcraft_doc::point_cloud::{Cells, Column, Floats, Indices, MAX_CELLS, MAX_COLUMNS, On};
+use solidcraft_doc::point_cloud::{Cells, Column, Floats, Indices, MAX_CELLS, MAX_COLUMNS, Names, On};
 
 use crate::ply::{Element, Kind, Rows, Scalar, header};
 use crate::{IoError, Result};
@@ -183,11 +184,16 @@ pub(crate) fn read_ply_cloud(bytes: &[u8], max_points: usize) -> Result<PlyCloud
             }
         }
     }
-    out.cells = Cells {
-        segments: Indices(segments.into()),
-        triangles: Indices(triangles.into()),
-        columns: columns.into_iter().map(|(_, values, c)| Column { values: Floats(values.into()), ..c }).collect(),
-    };
+    let columns: Vec<Column> = columns.into_iter().map(|(_, values, c)| Column { values: Floats(values.into()), ..c }).collect();
+    // Names only for whole-numbered properties the file has, the first comment for each.
+    let mut names: Vec<Names> = Vec::new();
+    for n in h.comments.iter().filter_map(|c| Names::parse(c)) {
+        let label = columns.iter().any(|c| c.name == n.property) && columns.iter().filter(|c| c.name == n.property).all(|c| c.integer);
+        if label && !names.iter().any(|m| m.property == n.property) && names.len() < MAX_COLUMNS {
+            names.push(n);
+        }
+    }
+    out.cells = Cells { segments: Indices(segments.into()), triangles: Indices(triangles.into()), columns, names };
     Ok(out)
 }
 
@@ -202,7 +208,7 @@ mod tests {
 
     #[test]
     fn edges_faces_and_every_property_are_kept() {
-        let text = "ply\nformat ascii 1.0\nelement vertex 4\nproperty float x\nproperty float y\nproperty float z\nproperty double t\n\
+        let text = "ply\nformat ascii 1.0\ncomment role: 7 wall, -1 none\ncomment t: seconds since the start\ncomment width: 0 thin\nelement vertex 4\nproperty float x\nproperty float y\nproperty float z\nproperty double t\n\
             element edge 2\nproperty int vertex1\nproperty int vertex2\nproperty int role\nproperty double width\n\
             element face 1\nproperty list uchar int vertex_indices\nproperty int layer\nend_header\n\
             0 0 0 0.5\n1 0 0 1.5\n1 1 0 2.5\n0 1 0 3.5\n0 1 7 0.42\n1 2 -1 0\n4 0 1 2 3 9\n";
@@ -216,6 +222,9 @@ mod tests {
         assert_eq!(&*col("role", On::Segment).values.0, &[7.0, -1.0]);
         assert_eq!(&*col("layer", On::Triangle).values.0, &[9.0, 9.0], "each triangle of the fan has the face's");
         r.cells.check(4).unwrap();
+        // Names for the whole-numbered `role` only: `t` is no list and `width` is not whole.
+        assert_eq!(r.cells.names.len(), 1);
+        assert_eq!(r.cells.names("role").and_then(|n| n.name(-1)), Some("none"));
         assert!(read_ply_cloud(text.as_bytes(), 3).is_err(), "edges and faces are not thinned");
         let bad = text.replace("1 2 -1 0", "1 9 -1 0");
         assert!(read_ply_cloud(bad.as_bytes(), 10).is_err(), "an edge to a missing vertex");

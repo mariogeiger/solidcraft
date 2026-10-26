@@ -2,7 +2,9 @@
 //! numbers on its points, segments and triangles (a PLY file's properties), to colour the cloud
 //! by and to filter it with. A point's numbers vary along the segments and across the triangles
 //! that meet there; a segment's or a triangle's are constant on it. A segment with `width` and
-//! `height` numbers is drawn as a bead of that cross-section; without them, as a line.
+//! `height` numbers is drawn as a bead of that cross-section; without them, as a line. Whole
+//! numbers may have names (`role: 0 outer wall, 1 inner wall` in a PLY file's comments): they
+//! are labels, filtered by a set of values rather than a range.
 
 use std::sync::Arc;
 
@@ -67,11 +69,46 @@ pub struct Cells {
     pub triangles: Indices,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<Column>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub names: Vec<Names>,
+}
+
+/// Most named values of one label.
+pub const MAX_NAMES: usize = 256;
+
+/// The names of a label's values.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Names {
+    pub property: String,
+    pub values: Vec<(i32, String)>,
+}
+
+impl Names {
+    /// `property: 0 name, 1 another name, -1 none`, or `None` for any other text.
+    pub fn parse(text: &str) -> Option<Names> {
+        let (property, rest) = text.split_once(':')?;
+        let property = property.trim();
+        if property.is_empty() || property.contains(char::is_whitespace) {
+            return None;
+        }
+        let values = rest
+            .split(',')
+            .map(|entry| {
+                let (value, name) = entry.trim().split_once(' ')?;
+                let name = name.trim();
+                (!name.is_empty()).then(|| Some((value.parse::<i32>().ok()?, name.to_string()))).flatten()
+            })
+            .collect::<Option<Vec<_>>>()?;
+        (!values.is_empty() && values.len() <= MAX_NAMES).then(|| Names { property: property.to_string(), values })
+    }
+    pub fn name(&self, value: i32) -> Option<&str> {
+        self.values.iter().find(|(v, _)| *v == value).map(|(_, n)| n.as_str())
+    }
 }
 
 impl Cells {
     pub fn is_empty(&self) -> bool {
-        self.segments.is_empty() && self.triangles.is_empty() && self.columns.is_empty()
+        self.segments.is_empty() && self.triangles.is_empty() && self.columns.is_empty() && self.names.is_empty()
     }
     pub fn segment_count(&self) -> usize {
         self.segments.0.len() / 2
@@ -86,6 +123,10 @@ impl Cells {
     /// The smallest and largest value named `name`, on whichever elements carry it.
     pub fn span(&self, name: &str) -> Option<[f64; 2]> {
         self.columns.iter().filter(|c| c.name == name).filter_map(Column::span).reduce(|[a, b], [c, d]| [a.min(c), b.max(d)])
+    }
+    /// The names of `property`'s values, when it is a label.
+    pub fn names(&self, property: &str) -> Option<&Names> {
+        self.names.iter().find(|n| n.property == property).filter(|_| self.integer(property))
     }
     /// Whether the values named `name` are whole numbers wherever they are.
     pub fn integer(&self, name: &str) -> bool {
@@ -117,15 +158,37 @@ impl Cells {
                 return bad(format!("property `{}` does not have one number per {}", c.name, c.on.name()));
             }
         }
+        if self.names.len() > MAX_COLUMNS || self.names.iter().any(|n| n.values.is_empty() || n.values.len() > MAX_NAMES) {
+            return bad("too many named values".into());
+        }
         Ok(())
     }
 }
 
-/// Which elements are shown: those whose property lies in a range (both ends included).
+/// Which elements are shown: those whose property lies in a range (both ends included), or, for
+/// a label, is one of a set of values.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Filter {
     pub property: String,
-    pub range: [f64; 2],
+    #[serde(flatten)]
+    pub keep: Keep,
+}
+
+/// The values a filter keeps.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Keep {
+    Range { range: [f64; 2] },
+    Values { values: Vec<i32> },
+}
+
+impl Filter {
+    pub fn range(&self) -> Option<[f64; 2]> {
+        match &self.keep {
+            Keep::Range { range } => Some(*range),
+            Keep::Values { .. } => None,
+        }
+    }
 }
 
 /// Indices into a cloud's points, shared between copies of the design.
@@ -208,6 +271,7 @@ mod tests {
                 Column { name: "t".into(), on: On::Point, integer: false, values: Floats(vec![0.0, 0.5, 1.0].into()) },
                 Column { name: "role".into(), on: On::Segment, integer: true, values: Floats(vec![0.0, 4.0].into()) },
             ],
+            names: Vec::new(),
         };
         let back: Cells = serde_json::from_str(&serde_json::to_string(&cells).unwrap()).unwrap();
         assert_eq!(back, cells);
@@ -216,6 +280,19 @@ mod tests {
         assert_eq!(cells.span("role"), Some([0.0, 4.0]));
         assert!(cells.integer("role") && !cells.integer("t") && !cells.integer("nope"));
         assert!(cells.column("role", On::Segment).is_some() && cells.column("role", On::Point).is_none());
+        // Named values make a label, and a filter keeps a range or a set of them.
+        let names = Names::parse("role: 0 outer wall, 4 bridge, -1 none").unwrap();
+        assert_eq!((names.name(4), names.name(-1), names.name(2)), (Some("bridge"), Some("none"), None));
+        for text in ["t: seconds since the start", "role 0 wall", ": 0 a", "role: x wall", "role: 0 "] {
+            assert!(Names::parse(text).is_none(), "{text}");
+        }
+        let mut named = cells.clone();
+        named.names = vec![names, Names::parse("t: 0 zero").unwrap()];
+        assert!(named.names("role").is_some() && named.names("t").is_none(), "only whole numbers are labels");
+        let set: Filter = serde_json::from_str(r#"{"property": "role", "values": [0, 4]}"#).unwrap();
+        let range: Filter = serde_json::from_str(r#"{"property": "t", "range": [1, 3]}"#).unwrap();
+        assert_eq!((set.range(), range.range()), (None, Some([1.0, 3.0])));
+        assert_eq!(serde_json::to_value(&set).unwrap(), serde_json::json!({"property": "role", "values": [0, 4]}));
         let mut short = cells.clone();
         short.columns[1].values = Floats(vec![0.0].into());
         assert!(short.check(3).is_err(), "one role for two segments");

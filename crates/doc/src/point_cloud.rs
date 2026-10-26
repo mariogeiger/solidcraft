@@ -11,7 +11,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use solidcraft_geom::Vec3;
 
 use crate::canvas::{base64_decode, base64_encode};
-pub use crate::point_cloud_cells::{Cells, Column, Filter, Floats, Indices, MAX_CELLS, MAX_COLUMNS, On};
+pub use crate::point_cloud_cells::{Cells, Column, Filter, Floats, Indices, Keep, MAX_CELLS, MAX_COLUMNS, MAX_NAMES, Names, On};
 use crate::{DocError, IDENTITY, Mat, Result};
 
 /// Most points one cloud may hold.
@@ -247,6 +247,35 @@ impl PointCloud {
         let v = self.world_corners()?.map(|p| [p.x, p.y, p.z][k]);
         Some([v.iter().copied().fold(f64::INFINITY, f64::min), v.iter().copied().fold(f64::NEG_INFINITY, f64::max)])
     }
+    /// The ramp's range: the one set, or else what is shown of the coloured property, its span
+    /// within every range filtering it.
+    pub fn color_range(&self) -> Option<[f64; 2]> {
+        if self.height_range.is_some() {
+            return self.height_range;
+        }
+        let property = self.colored_property()?;
+        let span = if self.color_by == ColorBy::Height { self.auto_height_range() } else { self.span(property) }?;
+        let shown =
+            self.filters.iter().filter(|f| f.property == property).filter_map(Filter::range).fold(span, |[lo, hi], [a, b]| [lo.max(a), hi.min(b)]);
+        Some(match shown {
+            [lo, hi] if lo < hi => [lo, hi],
+            [lo, hi] if lo == hi => [lo - 0.5, hi + 0.5],
+            _ => span,
+        })
+    }
+    /// Points no segment or triangle ends on: those drawn as dots.
+    pub fn isolated_points(&self) -> usize {
+        if self.cells.segments.is_empty() && self.cells.triangles.is_empty() {
+            return self.len();
+        }
+        let mut used = vec![false; self.len()];
+        for i in self.cells.segments.0.iter().chain(self.cells.triangles.0.iter()) {
+            if let Some(u) = used.get_mut(*i as usize) {
+                *u = true;
+            }
+        }
+        used.iter().filter(|u| !**u).count()
+    }
     pub fn height_range_now(&self) -> Option<[f64; 2]> {
         self.height_range.or_else(|| self.auto_height_range())
     }
@@ -254,11 +283,7 @@ impl PointCloud {
     pub fn shade(&self) -> impl Fn(usize) -> [u8; 3] + '_ {
         let single = self.color.unwrap_or(PLAIN).map(byte);
         let plain = PLAIN.map(byte);
-        let range = match self.color_by {
-            ColorBy::Height => self.height_range_now(),
-            ColorBy::Property => self.height_range.or_else(|| self.color_property.as_deref().and_then(|n| self.span(n))),
-            ColorBy::File | ColorBy::Single => None,
-        };
+        let range = self.color_range();
         let column = self.color_property.as_deref().and_then(|n| self.cells.column(n, On::Point));
         move |i| match self.color_by {
             ColorBy::File => self.colors.get(i).unwrap_or(plain),
@@ -319,7 +344,10 @@ impl PointCloud {
         }
         self.cells.check(self.points.len())?;
         if self.filters.len() > MAX_FILTERS
-            || self.filters.iter().any(|f| !(f.range[0].is_finite() && f.range[1].is_finite() && f.range[0] <= f.range[1]))
+            || self.filters.iter().any(|f| match &f.keep {
+                Keep::Range { range: [lo, hi] } => !(lo.is_finite() && hi.is_finite() && lo <= hi),
+                Keep::Values { values } => values.len() > MAX_NAMES,
+            })
         {
             return bad("its filters are not ranges, lowest first");
         }
@@ -531,6 +559,22 @@ mod tests {
         assert_eq!((lo, hi), (Vec3::new(996.5, 1.0, 2.0), Vec3::new(1000.0, 4.25, 1e6)));
         check_all(&[c]).unwrap();
         assert_eq!((unit_scale("M"), unit_scale("yd")), (Some(1000.0), None));
+    }
+
+    #[test]
+    fn the_ramp_spans_what_is_shown_unless_set_and_isolated_points_are_counted() {
+        let mut c = cloud(vec![0.0; 9], Vec::new());
+        c.cells.segments = Indices(vec![0, 1].into());
+        c.cells.columns.push(Column { name: "t".into(), on: On::Point, integer: false, values: Floats(vec![0.0, 10.0, 20.0].into()) });
+        (c.color_by, c.color_property) = (ColorBy::Property, Some("t".into()));
+        assert_eq!(c.color_range(), Some([0.0, 20.0]), "the whole span");
+        c.filters = vec![Filter { property: "t".into(), keep: Keep::Range { range: [5.0, 50.0] } }];
+        assert_eq!(c.color_range(), Some([5.0, 20.0]), "the span within the filter");
+        c.filters.push(Filter { property: "layer".into(), keep: Keep::Range { range: [0.0, 1.0] } });
+        assert_eq!(c.color_range(), Some([5.0, 20.0]), "another property's filter changes nothing");
+        c.height_range = Some([1.0, 2.0]);
+        assert_eq!(c.color_range(), Some([1.0, 2.0]), "a range set is kept");
+        assert_eq!(c.isolated_points(), 1, "point 2 ends no segment");
     }
 
     #[test]

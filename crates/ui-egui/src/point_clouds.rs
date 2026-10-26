@@ -7,8 +7,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use egui::{Painter, Shape};
+use solidcraft_engine::doc::point_cloud::Keep;
 use solidcraft_engine::doc::point_cloud::{COORDINATES, ColorBy, On, PLAIN, PointCloud, byte};
-use solidcraft_gpu::view::{Cell, CloudStyle, ColorMode, GpuCloud, NO_FILTER, cloud_cell};
+use solidcraft_gpu::view::{Cell, CloudFilter, CloudStyle, ColorMode, FILTERS, GpuCloud, cloud_cell};
 
 use crate::SolveApp;
 use crate::viewport::Proj;
@@ -27,7 +28,7 @@ struct Key {
     color_by: ColorBy,
     color: Option<[u32; 3]>,
     value: Option<String>,
-    filtered: [Option<String>; 2],
+    filtered: [Option<String>; FILTERS],
 }
 
 impl Key {
@@ -98,7 +99,9 @@ fn records(c: &PointCloud) -> Records {
         ColorBy::File => c.colors.get(i as usize).unwrap_or(plain),
         ColorBy::Height | ColorBy::Property => plain,
     };
-    let names = [c.colored_property(), c.filters.first().map(|f| f.property.as_str()), c.filters.get(1).map(|f| f.property.as_str())];
+    // The coloured property, then the filtered ones.
+    let names: [Option<&str>; 1 + FILTERS] =
+        std::array::from_fn(|k| if k == 0 { c.colored_property() } else { c.filters.get(k - 1).map(|f| f.property.as_str()) });
     let cells = &c.cells;
     let width = cells.column("width", On::Segment).map(|k| &k.values.0[..]);
     let height = cells.column("height", On::Segment).map(|k| &k.values.0[..]);
@@ -169,13 +172,14 @@ fn records(c: &PointCloud) -> Records {
     out.map(Arc::new)
 }
 
-/// The coloured value and the two filtered values of a cell, where it has them.
-fn fill(cell: &mut Cell, [value, f0, f1]: [Option<[f32; 3]>; 3]) {
+/// The coloured value and the filtered values of a cell, where it has them.
+fn fill(cell: &mut Cell, values: [Option<[f32; 3]>; 1 + FILTERS]) {
+    let [value, filtered @ ..] = values;
     if let Some(v) = value {
         cell.value = v;
-        cell.has |= 4;
+        cell.has |= 1 << FILTERS;
     }
-    for (k, f) in [f0, f1].into_iter().enumerate() {
+    for (k, f) in filtered.into_iter().enumerate() {
         if let Some(f) = f {
             cell.filtered[k] = f;
             cell.has |= 1 << k;
@@ -183,23 +187,41 @@ fn fill(cell: &mut Cell, [value, f0, f1]: [Option<[f32; 3]>; 3]) {
     }
 }
 
-/// How a cloud is coloured and which of its elements are shown, as the shaders read it.
-fn style(c: &PointCloud) -> CloudStyle {
+/// How a cloud is coloured and which of its elements are shown, as the shaders read it; a filter
+/// playing in the Edit Point Cloud card shows its range now.
+fn style(c: &PointCloud, playing: impl Fn(usize) -> Option<[f64; 2]>) -> CloudStyle {
+    let mut c = std::borrow::Cow::Borrowed(c);
+    for k in 0..c.filters.len() {
+        if let Some(range) = playing(k)
+            && let Some(f) = c.to_mut().filters.get_mut(k)
+        {
+            f.keep = Keep::Range { range };
+        }
+    }
     let property = c.colored_property();
     let mode = match (c.color_by, property) {
         (ColorBy::File | ColorBy::Single, _) | (_, None) => ColorMode::Own,
         (_, Some(name)) if c.cells.integer(name) => ColorMode::Palette,
         _ => ColorMode::Ramp,
     };
-    let range = match c.color_by {
-        ColorBy::Height => c.height_range_now(),
-        _ => c.height_range.or_else(|| property.and_then(|p| c.span(p))),
-    };
-    let mut filters = [NO_FILTER; 2];
-    for (f, r) in c.filters.iter().zip(filters.iter_mut()) {
-        *r = f.range.map(|v| v as f32);
+    let mut filters = [CloudFilter::Off; FILTERS];
+    for (f, slot) in c.filters.iter().zip(filters.iter_mut()) {
+        *slot = match &f.keep {
+            Keep::Range { range } => CloudFilter::Range(range.map(|v| v as f32)),
+            Keep::Values { values } => {
+                // Bit `i` is the value `offset + i`, from the label's smallest value.
+                let offset = c.cells.names(&f.property).and_then(|n| n.values.iter().map(|(v, _)| *v).min()).unwrap_or(0);
+                let mask = values
+                    .iter()
+                    .filter_map(|v| u32::try_from(i64::from(*v) - i64::from(offset)).ok())
+                    .filter(|i| *i < 32)
+                    .fold(0u32, |m, i| m | 1 << i);
+                CloudFilter::Values { offset, mask }
+            }
+        };
     }
-    CloudStyle { mode, range: range.unwrap_or([0.0, 1.0]).map(|v| v as f32), filters, point_size: c.point_size as f32 }
+    let range = c.color_range().unwrap_or([0.0, 1.0]).map(|v| v as f32);
+    CloudStyle { mode, range, filters, point_size: c.point_size as f32 }
 }
 
 /// The shown point clouds as the GPU draws them.
@@ -223,7 +245,8 @@ pub fn gpu_clouds(app: &SolveApp) -> Vec<GpuCloud> {
                         (version, records)
                     }
                 };
-                GpuCloud { id: c.id, version, dots, segments, triangles, style: style(c) }
+                let playing = |k: usize| app.tree.cloud_panel.as_ref().and_then(|p| p.playing(c.id, k));
+                GpuCloud { id: c.id, version, dots, segments, triangles, style: style(c, playing) }
             })
             .collect()
     })

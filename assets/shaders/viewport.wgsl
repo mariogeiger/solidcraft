@@ -700,11 +700,11 @@ fn fs_line_all(i: LOut) -> @location(0) vec4<f32> {
 // Point clouds and their cells (`view/clouds.rs`): dots, segments as beads (or lines when they
 // have no size) and triangles, from one record per element. The cloud's style colours them by
 // their own colour, a ramp or a palette, and shows only those whose filtered values lie in its
-// ranges; values vary across an element, so a filter cuts it where its value crosses the range.
+// ranges or sets; values vary across an element, so a range cuts it where its value crosses an end.
 
 struct Cloud {
-    style: vec4<f32>,  // x: colour (0 own, 1 ramp, 2 palette), y: dot size (px), z, w: ramp range
-    ranges: vec4<f32>, // the two filters' ranges: low, high, low, high
+    style: vec4<f32>,               // x: colour (0 own, 1 ramp, 2 palette), y: dot size (px), z, w: ramp range
+    filters: array<vec4<f32>, 4>,   // x: kind (0 off, 1 range y…z, 2 whole values y + i for the bits i of w)
 };
 @group(1) @binding(3) var<uniform> cloud: Cloud;
 
@@ -717,6 +717,8 @@ struct CIn {
     @location(3) v: vec3<f32>,
     @location(4) f0: vec3<f32>,
     @location(5) f1: vec3<f32>,
+    @location(10) f2: vec3<f32>,
+    @location(11) f3: vec3<f32>,
     @location(6) size: vec2<f32>,
     @location(7) rgb: vec4<f32>,
 };
@@ -726,7 +728,7 @@ struct COut {
     @location(0) wp: vec3<f32>,
     @location(1) n: vec3<f32>,     // zero: not lit
     @location(2) v: f32,
-    @location(3) f: vec2<f32>,
+    @location(3) f: vec4<f32>,
     @location(4) rgb: vec3<f32>,
     @location(5) at: vec2<f32>,    // a dot's place on its disc
     @location(6) @interpolate(flat) has: u32,
@@ -738,7 +740,7 @@ fn cloud_out(i: CIn, w: vec3<f32>, wp: vec3<f32>, pos: vec4<f32>, n: vec3<f32>) 
     o.wp = wp;
     o.n = n;
     o.v = dot(w, i.v);
-    o.f = vec2<f32>(dot(w, i.f0), dot(w, i.f1));
+    o.f = vec4<f32>(dot(w, i.f0), dot(w, i.f1), dot(w, i.f2), dot(w, i.f3));
     o.rgb = i.rgb.rgb;
     o.at = vec2<f32>(0.0);
     o.has = u32(round(i.rgb.a * 255.0));
@@ -789,13 +791,29 @@ fn stadium(j: u32, size: vec2<f32>) -> vec4<f32> {
     return vec4<f32>(select(-flat_half, flat_half, right) + r * cos(a), r * sin(a), cos(a), sin(a));
 }
 
-/// Whether a filter leaves out the whole element: all its values on one side of the range.
+/// Whether filter `f` keeps the value `v`.
+fn cloud_keeps(f: vec4<f32>, v: f32) -> bool {
+    if (f.x < 0.5) { return true; }
+    if (f.x < 1.5) { return v >= f.y && v <= f.z; }
+    let k = i32(round(v)) - i32(round(f.y));
+    return k >= 0 && k < 32 && ((bitcast<u32>(f.w) >> u32(k)) & 1u) != 0u;
+}
+
+/// Whether filter `f` leaves out a whole element with values `v` at its corners: all on one
+/// side of a range, or a whole value (the same at every corner) not kept.
+fn cloud_drops(f: vec4<f32>, v: vec3<f32>) -> bool {
+    if (f.x > 1.5) { return !cloud_keeps(f, v.x); }
+    return f.x > 0.5 && (all(v < vec3<f32>(f.y)) || all(v > vec3<f32>(f.z)));
+}
+
+/// Whether a filter leaves out the whole element.
 fn filtered_out(i: CIn) -> bool {
-    let f = cloud.ranges;
     let has = u32(round(i.rgb.a * 255.0));
-    let below0 = all(vec3<f32>(i.f0) < vec3<f32>(f.x)) || all(vec3<f32>(i.f0) > vec3<f32>(f.y));
-    let below1 = all(vec3<f32>(i.f1) < vec3<f32>(f.z)) || all(vec3<f32>(i.f1) > vec3<f32>(f.w));
-    return ((has & 1u) != 0u && below0) || ((has & 2u) != 0u && below1);
+    let values = array<vec3<f32>, 4>(i.f0, i.f1, i.f2, i.f3);
+    for (var k = 0u; k < 4u; k++) {
+        if (((has >> k) & 1u) != 0u && cloud_drops(cloud.filters[k], values[k])) { return true; }
+    }
+    return false;
 }
 
 @vertex
@@ -873,21 +891,19 @@ fn cloud_palette(v: f32) -> vec3<f32> {
     return colours[u32(round(v)) % 10u] / 255.0;
 }
 
-fn in_range(v: f32, lo: f32, hi: f32) -> bool {
-    return v >= lo && v <= hi;
-}
 
 @fragment
 fn fs_cloud(o: COut) -> @location(0) vec4<f32> {
-    let f = cloud.ranges;
-    let out0 = (o.has & 1u) != 0u && !in_range(o.f.x, f.x, f.y);
-    let out1 = (o.has & 2u) != 0u && !in_range(o.f.y, f.z, f.w);
-    if (clipped(o.wp) || dot(o.at, o.at) > 1.0 || out0 || out1) { discard; }
+    var out = clipped(o.wp) || dot(o.at, o.at) > 1.0;
+    for (var k = 0u; k < 4u; k++) {
+        out = out || (((o.has >> k) & 1u) != 0u && !cloud_keeps(cloud.filters[k], o.f[k]));
+    }
+    if (out) { discard; }
     var c = o.rgb;
     let mode = cloud.style.x;
-    if ((o.has & 4u) != 0u && mode > 1.5) {
+    if ((o.has & 16u) != 0u && mode > 1.5) {
         c = cloud_palette(o.v);
-    } else if ((o.has & 4u) != 0u && mode > 0.5) {
+    } else if ((o.has & 16u) != 0u && mode > 0.5) {
         c = cloud_ramp((o.v - cloud.style.z) / max(cloud.style.w - cloud.style.z, 1e-12));
     }
     if (length(o.n) > 0.5) {
