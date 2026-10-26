@@ -151,6 +151,7 @@ fn execute(app: &mut SolveApp, id: &str, params: Value) -> Result<Value, String>
             "view.layout"
                 | "view.navigate"
                 | "view.ambient_occlusion"
+                | "view.perspective"
                 | "view.graphics_preset"
                 | "view.history_layout"
                 | "browser.expand_all"
