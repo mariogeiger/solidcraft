@@ -98,6 +98,12 @@ pub struct ViewportState {
     pub(crate) layout: Option<crate::viewport_layout::Layout>,
     pub(crate) palette_rect: Option<Rect>,
     pub(crate) dialog_rect: Option<Rect>,
+    /// OK or Cancel clicked in the view's corner for the open dialog (#6709), which
+    /// `dialogs::show` acts on in the same frame as its own buttons.
+    pub(crate) corner: Option<crate::ui_kit::Action>,
+    /// Whether the open dialog's OK was enabled when it was last drawn: the corner's check
+    /// greys out with it.
+    pub(crate) corner_ok: bool,
     pub gpu: Option<GpuTarget>,
     /// What the GPU drew last frame, shared with the renderer (the frame-rate details, #2548).
     pub(crate) draw_stats: Option<crate::gpu::DrawStatsHandle>,
@@ -4775,11 +4781,11 @@ pub(crate) fn refresh_layout(app: &mut SolveApp, scale: f32) {
                 content.max.x = (chat.left() - crate::shell::SHELL_GAP).clamp(content.left(), content.right());
             }
         }
-        app.viewport.layout = Some(if app.ui.layout == crate::shell::LayoutMode::Docked {
-            crate::viewport_layout::Layout::new(rect, &docks, scale, app.preferences.navigator_style)
-        } else {
-            crate::viewport_layout::Layout::with_content(rect, content, &docks, scale, app.preferences.navigator_style)
-        });
+        // OK and Cancel in the view's corner (#6709) take the top right; the axis view goes below.
+        let corner = crate::view_confirm::size(app);
+        let content = if app.ui.layout == crate::shell::LayoutMode::Docked { rect } else { content };
+        app.viewport.layout =
+            Some(crate::viewport_layout::Layout::with_content(rect, content, &docks, scale, app.preferences.navigator_style, corner));
     }
 }
 
