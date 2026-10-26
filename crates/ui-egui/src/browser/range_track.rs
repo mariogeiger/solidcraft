@@ -113,15 +113,16 @@ pub(super) fn range_track(ui: &mut Ui, key: &str, [lo, hi]: [f64; 2], span: [f64
         painter.text(rect.right_top(), egui::Align2::RIGHT_TOP, "zoom", egui::FontId::proportional(t.font_label * 0.75), t.control_border);
     }
 
-    // The two ends as numbers.
+    // The two ends as numbers. A range beyond the span (a filter set wider) is shown as it is,
+    // not narrowed to the span on display.
     let step = if integer { 1.0 } else { per_point };
     ui.horizontal(|ui| {
         let decimals = if integer { 0 } else { (-(per_point.max(1e-12)).log10()).ceil().clamp(0.0, 6.0) as usize };
         let mut l = range[0];
         let mut h = range[1];
-        let fl = ui.add(egui::DragValue::new(&mut l).speed(step).range(full[0]..=h).fixed_decimals(decimals));
+        let fl = ui.add(egui::DragValue::new(&mut l).speed(step).range(full[0]..=h).clamp_existing_to_range(false).fixed_decimals(decimals));
         ui.label("…");
-        let fh = ui.add(egui::DragValue::new(&mut h).speed(step).range(l..=full[1]).fixed_decimals(decimals));
+        let fh = ui.add(egui::DragValue::new(&mut h).speed(step).range(l..=full[1]).clamp_existing_to_range(false).fixed_decimals(decimals));
         if fl.changed() || fh.changed() {
             range = [snap(l, integer), snap(h, integer)];
         }
