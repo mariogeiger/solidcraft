@@ -1,0 +1,220 @@
+//! Point clouds and the cells between their points: dots, segments drawn as beads (or lines when
+//! they have no size), and triangles. Every element is uploaded once, as one record of a single
+//! layout whatever its kind; how they are coloured and which are shown is a [`CloudStyle`] of a
+//! few numbers the shaders read, so a new colour range or filter range draws again at once
+//! without uploading anything.
+
+use std::sync::Arc;
+
+use super::{Batch, Tally, upload};
+
+/// A point cloud as the GPU draws it.
+#[derive(Clone)]
+pub struct GpuCloud {
+    pub id: u64,
+    /// Changes when the records change (they are uploaded again).
+    pub version: u64,
+    /// [`CELL_SIZE`] bytes per element, written by [`cloud_cell`]: the points drawn as dots,
+    /// the segments and the triangles.
+    pub dots: Arc<Vec<u8>>,
+    pub segments: Arc<Vec<u8>>,
+    pub triangles: Arc<Vec<u8>>,
+    pub style: CloudStyle,
+}
+
+/// How a cloud is coloured and which of its elements are shown.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CloudStyle {
+    pub mode: ColorMode,
+    /// The ramp's range of values.
+    pub range: [f32; 2],
+    /// An element is shown where its two filtered values lie in these ranges (ends included).
+    pub filters: [[f32; 2]; 2],
+    /// A dot's size on screen, in pixels.
+    pub point_size: f32,
+}
+
+/// Where an element's colour comes from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ColorMode {
+    /// Its own colour ([`Cell::rgb`]).
+    #[default]
+    Own,
+    /// The ramp over [`CloudStyle::range`] at its value.
+    Ramp,
+    /// The palette at its whole value.
+    Palette,
+}
+
+/// A filter range that shows everything.
+pub const NO_FILTER: [f32; 2] = [-f32::MAX, f32::MAX];
+
+/// One element: its corners (a point repeats its own, a segment its second), the coloured value
+/// and the two filtered values at each corner, a bead's width and height (zero: a line), its own
+/// colour, and which of the value and the two filters it has (bits 2, 0 and 1 of `has`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Cell {
+    pub corners: [[f32; 3]; 3],
+    pub value: [f32; 3],
+    pub filtered: [[f32; 3]; 2],
+    pub size: [f32; 2],
+    pub rgb: [u8; 3],
+    pub has: u8,
+}
+
+/// Bytes per [`Cell`].
+pub const CELL_SIZE: usize = 84;
+
+/// Append a cell's record.
+pub fn cloud_cell(out: &mut Vec<u8>, c: &Cell) {
+    let floats = c.corners.iter().flatten().chain(&c.value).chain(c.filtered.iter().flatten()).chain(&c.size);
+    for v in floats {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out.extend_from_slice(&c.rgb);
+    out.push(c.has);
+}
+
+fn cell_layout() -> wgpu::VertexBufferLayout<'static> {
+    const A: [wgpu::VertexAttribute; 8] = wgpu::vertex_attr_array![
+        0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Float32x3,
+        4 => Float32x3, 5 => Float32x3, 6 => Float32x2, 7 => Unorm8x4
+    ];
+    wgpu::VertexBufferLayout { array_stride: CELL_SIZE as u64, step_mode: wgpu::VertexStepMode::Instance, attributes: &A }
+}
+
+/// Sides of a bead's cross-section: a stadium's two half-discs as an octagon.
+const SIDES: u32 = 8;
+/// Vertices drawn per dot, segment and triangle.
+const VERTICES: [u32; 3] = [6, SIDES * 6, 3];
+
+/// The uniform a cloud's style is written to, bytes.
+const STYLE_SIZE: u64 = 32;
+
+fn style_bytes(s: &CloudStyle) -> [u8; STYLE_SIZE as usize] {
+    let mode = match s.mode {
+        ColorMode::Own => 0.0,
+        ColorMode::Ramp => 1.0,
+        ColorMode::Palette => 2.0,
+    };
+    let v = [mode, s.point_size, s.range[0], s.range[1], s.filters[0][0], s.filters[0][1], s.filters[1][0], s.filters[1][1]];
+    let mut out = [0u8; STYLE_SIZE as usize];
+    for (o, x) in out.as_chunks_mut::<4>().0.iter_mut().zip(v) {
+        *o = f32::to_le_bytes(x);
+    }
+    out
+}
+
+/// The pipelines that draw clouds: dots, segments and triangles.
+pub(super) struct CloudPipes {
+    layout: wgpu::BindGroupLayout,
+    pipes: [wgpu::RenderPipeline; 3],
+}
+
+impl CloudPipes {
+    pub(super) fn new(
+        device: &wgpu::Device,
+        module: &wgpu::ShaderModule,
+        viewport: &wgpu::BindGroupLayout,
+        target: super::GpuTarget,
+        depth: Option<wgpu::DepthStencilState>,
+    ) -> CloudPipes {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sc_cloud"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                count: None,
+            }],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sc_cloud"),
+            bind_group_layouts: &[Some(viewport), Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipe = |vs: &str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(vs),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState { module, entry_point: Some(vs), buffers: &[Some(cell_layout())], compilation_options: Default::default() },
+                primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
+                depth_stencil: depth.clone(),
+                multisample: wgpu::MultisampleState { count: target.samples.max(1), mask: !0, alpha_to_coverage_enabled: false },
+                fragment: Some(wgpu::FragmentState {
+                    module,
+                    entry_point: Some("fs_cloud"),
+                    targets: &[Some(wgpu::ColorTargetState { format: target.format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                    compilation_options: Default::default(),
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        CloudPipes { pipes: [pipe("vs_cloud_dot"), pipe("vs_cloud_segment"), pipe("vs_cloud_triangle")], layout }
+    }
+}
+
+/// A cloud on the GPU: its records by kind and its style's uniform.
+struct Uploaded {
+    version: u64,
+    kinds: [Option<Batch>; 3],
+    style: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+}
+
+/// The clouds on the GPU, by id.
+#[derive(Default)]
+pub(super) struct CloudDraws(std::collections::HashMap<u64, Uploaded>);
+
+impl CloudDraws {
+    /// Upload new or changed clouds, drop removed ones, and write every style.
+    pub(super) fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, pipes: &CloudPipes, clouds: &[GpuCloud]) {
+        self.0.retain(|id, _| clouds.iter().any(|c| c.id == *id));
+        for c in clouds {
+            if self.0.get(&c.id).is_none_or(|u| u.version != c.version) {
+                let style = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("sc_cloud_style"),
+                    size: STYLE_SIZE,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("sc_cloud_style"),
+                    layout: &pipes.layout,
+                    entries: &[wgpu::BindGroupEntry { binding: 3, resource: style.as_entire_binding() }],
+                });
+                let kinds = [&c.dots, &c.segments, &c.triangles].map(|bytes| upload(device, "sc_cloud", bytes, CELL_SIZE));
+                self.0.insert(c.id, Uploaded { version: c.version, kinds, style, bind });
+            }
+            if let Some(u) = self.0.get(&c.id) {
+                queue.write_buffer(&u.style, 0, &style_bytes(&c.style));
+            }
+        }
+    }
+
+    pub(super) fn paint(&self, pass: &mut wgpu::RenderPass<'_>, pipes: &CloudPipes, tally: &Tally) {
+        for u in self.0.values() {
+            pass.set_bind_group(1, &u.bind, &[]);
+            for ((batch, pipe), vertices) in u.kinds.iter().zip(&pipes.pipes).zip(VERTICES) {
+                let Some(batch) = batch else { continue };
+                pass.set_pipeline(pipe);
+                for (buffer, count) in &batch.parts {
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    pass.draw(0..vertices, 0..*count);
+                    tally.triangles(vertices, *count);
+                }
+            }
+        }
+    }
+}
+
+/// What a frame's clouds add to its picture's key.
+pub(super) fn hash_clouds(clouds: &[GpuCloud], h: &mut impl std::hash::Hasher) {
+    use std::hash::Hash as _;
+    for c in clouds {
+        c.id.hash(h);
+        c.version.hash(h);
+        style_bytes(&c.style).hash(h);
+    }
+}

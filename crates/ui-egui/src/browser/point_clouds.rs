@@ -4,7 +4,7 @@
 //! opening are one undo step.
 
 use serde_json::{Value, json};
-use solidcraft_engine::doc::point_cloud::{ColorBy, PLAIN, PointCloud, UNITS, byte};
+use solidcraft_engine::doc::point_cloud::{COORDINATES, ColorBy, PLAIN, PointCloud, UNITS, byte};
 use solidcraft_engine::view::POINT_CLOUDS_FOLDER;
 
 use super::{Actions, Row, draw_row, is_open, panel_pos, toggle, toggle_folder};
@@ -42,6 +42,18 @@ impl CloudPanel {
 
 /// The ways the card colours the points, as the dropdown lists them.
 const COLOR_BY: [(ColorBy, &str); 3] = [(ColorBy::File, "File Colors"), (ColorBy::Single, "Single Color"), (ColorBy::Height, "Height")];
+
+/// Two sliders for a range within `span`, lowest first; the range when either moved.
+fn range_sliders(ui: &mut egui::Ui, key: &str, [mut lo, mut hi]: [f64; 2], span: [f64; 2], integer: bool) -> Option<[f64; 2]> {
+    let options = || ui_kit::Slider { step: integer.then_some(1.0), integer, ..Default::default() };
+    let full = span[0]..=span[1].max(span[0] + 1e-9);
+    let mut changed = false;
+    ui.push_id(key, |ui| {
+        changed |= ui_kit::row(ui, crate::i18n::tr_label("From"), |ui| ui_kit::slider(ui, &mut lo, full.clone(), options())).changed();
+        changed |= ui_kit::row(ui, crate::i18n::tr_label("To"), |ui| ui_kit::slider(ui, &mut hi, full.clone(), options())).changed();
+    });
+    changed.then(|| [lo.min(hi), hi.max(lo)])
+}
 
 pub(super) fn rows(app: &mut SolveApp, ui: &mut egui::Ui, depth: usize, acts: &mut Actions) {
     let clouds: Vec<(u64, String, bool)> = app.session.doc.point_clouds.iter().map(|c| (c.id, c.name.clone(), c.visible)).collect();
@@ -103,6 +115,7 @@ pub(crate) fn panel(app: &mut SolveApp, ctx: &egui::Context) {
         return;
     };
     let mut edit: Option<Value> = None;
+    let mut reload = false;
     let title = crate::i18n::format("browser.edit_point_cloud_title", &[("name", &c.name)]);
     let (units, decimals) = (app.session.doc.units.clone(), app.preferences.length_decimals);
     let auto = if c.color_by == ColorBy::Height { m.auto_range(&c) } else { None };
@@ -127,14 +140,22 @@ pub(crate) fn panel(app: &mut SolveApp, ctx: &egui::Context) {
             if ui_kit::row(ui, crate::i18n::tr("ui.point_cloud_size"), |ui| ui_kit::slider(ui, &mut size, 0.5..=16.0, Default::default())).changed() {
                 edit = Some(json!({ "cloud": c.id, "point_size": size }));
             }
-            let labels: Vec<&str> = COLOR_BY.iter().map(|(_, l)| *l).collect();
-            let was = COLOR_BY.iter().position(|(b, _)| *b == c.color_by).unwrap_or(0);
+            // The ways of colouring, then every property of the file.
+            let properties: Vec<&str> = c.property_names().filter(|n| !COORDINATES.contains(n)).collect();
+            let labels: Vec<&str> = COLOR_BY.iter().map(|(_, l)| *l).chain(properties.iter().copied()).collect();
+            let was = match c.color_by {
+                ColorBy::Property => {
+                    c.color_property.as_deref().and_then(|n| properties.iter().position(|p| *p == n)).map_or(0, |k| COLOR_BY.len() + k)
+                }
+                by => COLOR_BY.iter().position(|(b, _)| *b == by).unwrap_or(0),
+            };
             let mut by = was;
             ui_kit::row(ui, crate::i18n::tr("ui.point_cloud_color_by"), |ui| ui_kit::dropdown(ui, "point_cloud_color_by", &mut by, &labels));
-            if by != was
-                && let Some((b, _)) = COLOR_BY.get(by)
-            {
-                edit = Some(json!({ "cloud": c.id, "color_by": b.name() }));
+            if by != was {
+                let name = COLOR_BY.get(by).map(|(b, _)| b.name()).or_else(|| properties.get(by - COLOR_BY.len()).copied());
+                if let Some(name) = name {
+                    edit = Some(json!({ "cloud": c.id, "color_by": name }));
+                }
             }
             match c.color_by {
                 ColorBy::File if c.colors.is_empty() => {
@@ -172,8 +193,63 @@ pub(crate) fn panel(app: &mut SolveApp, ctx: &egui::Context) {
                         }
                     }
                 }
+                ColorBy::Property => {
+                    let name = c.color_property.as_deref().unwrap_or_default();
+                    // Whole numbers are labels, each its own colour; other numbers a ramp.
+                    if !c.cells.integer(name)
+                        && let Some(span) = c.span(name)
+                        && let Some(range) = range_sliders(ui, "point_cloud_color_range", c.height_range.unwrap_or(span), span, false)
+                    {
+                        edit = Some(json!({ "cloud": c.id, "color_range": range }));
+                    }
+                }
+            }
+            // Filters: only what lies in every range is shown.
+            let mut filters: Vec<Value> = c.filters.iter().map(|f| json!({"property": f.property, "range": f.range})).collect();
+            let mut changed = false;
+            let mut removed = None;
+            for (k, f) in c.filters.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(crate::i18n::tr_dyn(&format!("Filter: {}", f.property)));
+                    if ui_kit::button(ui, "×", ui_kit::Button::Small).clicked() {
+                        removed = Some(k);
+                    }
+                });
+                if let Some(span) = c.span(&f.property)
+                    && let Some(range) = range_sliders(ui, &format!("point_cloud_filter_{k}"), f.range, span, c.cells.integer(&f.property))
+                    && let Some(slot) = filters.get_mut(k)
+                {
+                    *slot = json!({"property": f.property, "range": range});
+                    changed = true;
+                }
+            }
+            if let Some(k) = removed {
+                filters.remove(k);
+                changed = true;
+            }
+            let all: Vec<&str> = c.property_names().collect();
+            if c.filters.len() < 2 {
+                let mut add_labels = vec![crate::i18n::tr_label("Add filter…")];
+                add_labels.extend(all.iter().copied());
+                let mut pick = 0;
+                ui_kit::row(ui, crate::i18n::tr_label("Filter by"), |ui| ui_kit::dropdown(ui, "point_cloud_add_filter", &mut pick, &add_labels));
+                if let Some(name) = all.get(pick.wrapping_sub(1))
+                    && let Some(span) = c.span(name)
+                {
+                    filters.push(json!({"property": name, "range": span}));
+                    changed = true;
+                }
+            }
+            if changed {
+                edit = Some(json!({ "cloud": c.id, "filters": filters }));
+            }
+            if !c.source.is_empty() && ui_kit::button(ui, crate::i18n::tr_label("Reload from file"), ui_kit::Button::Normal).clicked() {
+                reload = true;
             }
         });
+    if reload {
+        let _ = app.run("pointcloud.reload", json!({ "cloud": c.id }));
+    }
     if let Some(p) = edit
         && app.run("pointcloud.edit", p).is_ok()
     {

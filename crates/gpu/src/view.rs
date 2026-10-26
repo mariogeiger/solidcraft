@@ -17,6 +17,8 @@ use wgpu::util::DeviceExt;
 use crate::pbr;
 
 mod ao;
+mod clouds;
+pub use clouds::{CELL_SIZE, Cell, CloudStyle, ColorMode, GpuCloud, NO_FILTER, cloud_cell};
 #[cfg(not(target_arch = "wasm32"))]
 mod msaa_check;
 mod oit;
@@ -917,34 +919,6 @@ pub struct GpuImage {
 /// Image vertex: position (3 × f32), uv (2 × f32), opacity (f32).
 const IMG_SIZE: usize = 24;
 
-/// A point cloud: round dots of a size on screen, depth-tested and written like the model's
-/// faces.
-#[derive(Clone)]
-pub struct GpuPoints {
-    pub id: u64,
-    /// Changes when the points change (they are uploaded again).
-    pub version: u64,
-    /// [`CLOUD_POINT_SIZE`] bytes per point: position (3 × f32, in the design), colour (RGBA8,
-    /// the alpha the dot's size in eighths of a pixel, see [`cloud_point`]).
-    pub bytes: Arc<Vec<u8>>,
-}
-
-/// Bytes per point of a [`GpuPoints`].
-pub const CLOUD_POINT_SIZE: usize = 16;
-
-/// A point of a [`GpuPoints`]: where it is, its colour and its size on screen (pixels, up to 31).
-pub fn cloud_point(out: &mut Vec<u8>, p: [f32; 3], rgb: [u8; 3], size: f32) {
-    for v in p {
-        out.extend_from_slice(&v.to_le_bytes());
-    }
-    out.extend_from_slice(&rgb);
-    out.push((size * 8.0).round().clamp(8.0, 255.0) as u8);
-}
-
-fn point_layout() -> wgpu::VertexBufferLayout<'static> {
-    const A: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4];
-    wgpu::VertexBufferLayout { array_stride: CLOUD_POINT_SIZE as u64, step_mode: wgpu::VertexStepMode::Instance, attributes: &A }
-}
 /// Ambient occlusion samples per shaded pixel in a still picture (the shader's most).
 pub const AO_SAMPLES: u32 = 32;
 
@@ -983,8 +957,8 @@ pub struct Frame {
     pub cap: [f32; 4],
     /// Canvases and decals.
     pub images: Vec<GpuImage>,
-    /// Point clouds.
-    pub points: Vec<GpuPoints>,
+    /// Point clouds and their cells.
+    pub clouds: Vec<GpuCloud>,
     /// Surface analysis: (mode: 0 none, 1 zebra, 2 draft, 3 curvature, 4 environment,
     /// 5 accessibility; parameter; scale; size) and the pull / access direction.
     pub analysis: [f32; 8],
@@ -2057,10 +2031,8 @@ pub struct Renderer {
     textures: std::collections::HashMap<u64, (u64, wgpu::BindGroup)>,
     /// This frame's quads: (image id, vertices).
     quads: Vec<(u64, Batch)>,
-    /// Point clouds' dots.
-    point: wgpu::RenderPipeline,
-    /// Point clouds by id: (version, points).
-    clouds: std::collections::HashMap<u64, (u64, Batch)>,
+    cloud_pipes: clouds::CloudPipes,
+    clouds: clouds::CloudDraws,
     access_bgl: wgpu::BindGroupLayout,
     /// The accessibility depth map (a 1 × 1 stand-in when there is none) and its version.
     access_bind: wgpu::BindGroup,
@@ -2872,7 +2844,7 @@ impl Renderer {
                 pipeline("sc_guide_lines", "vs_line", "fs_line_all", line_layout(), depth(wgpu::CompareFunction::LessEqual, false), alpha),
             )
         };
-        let point = || pipeline("sc_points", "vs_point", "fs_point", point_layout(), depth(wgpu::CompareFunction::Less, true), None);
+        let cloud_pipes = || clouds::CloudPipes::new(device, &module, &bgl, t, depth(wgpu::CompareFunction::Less, true));
         let guide_trans = || pipeline("sc_guide_trans", "vs_tri", "fs_tri_all", tri_layout(), depth(wgpu::CompareFunction::LessEqual, false), alpha);
         // Each job on a thread of its own where the device allows it: D3D12 compiles every shader
         // as its pipeline is made, which took seconds one after another (#4860).
@@ -2889,7 +2861,7 @@ impl Renderer {
             let lines = jobs.spawn(lines);
             let lines_all = jobs.spawn(lines_all);
             let guide_trans = jobs.spawn(guide_trans);
-            let point = jobs.spawn(point);
+            let cloud_pipes = jobs.spawn(cloud_pipes);
             let image = jobs.spawn(image);
             let ao = jobs.spawn(ao);
             let oit = jobs.spawn(oit);
@@ -2938,7 +2910,7 @@ impl Renderer {
                 sampler,
                 textures: Default::default(),
                 quads: Vec::new(),
-                point: point.join(),
+                cloud_pipes: cloud_pipes.join(),
                 clouds: Default::default(),
                 tri,
                 tri_cut: cut(tri_marks, tri_cap),
@@ -3260,10 +3232,7 @@ fn frame_key(cb: &Frame) -> u64 {
         img.corners.iter().flatten().for_each(|v| v.to_bits().hash(&mut h));
         img.opacity.to_bits().hash(&mut h);
     }
-    for cloud in &cb.points {
-        cloud.id.hash(&mut h);
-        cloud.version.hash(&mut h);
-    }
+    clouds::hash_clouds(&cb.clouds, &mut h);
     match &cb.access {
         Some(a) => {
             true.hash(&mut h);
@@ -3395,20 +3364,7 @@ impl Renderer {
                 res.quads.push((img.id, b));
             }
         }
-        // Point clouds: upload new or changed ones, drop removed ones.
-        res.clouds.retain(|id, _| cb.points.iter().any(|c| c.id == *id));
-        for c in &cb.points {
-            if res.clouds.get(&c.id).is_none_or(|(v, _)| *v != c.version) {
-                match upload(device, "sc_points", &c.bytes, CLOUD_POINT_SIZE) {
-                    Some(b) => {
-                        res.clouds.insert(c.id, (c.version, b));
-                    }
-                    None => {
-                        res.clouds.remove(&c.id);
-                    }
-                }
-            }
-        }
+        res.clouds.prepare(device, queue, &res.cloud_pipes, &cb.clouds);
         res.ss_ready = (cb.ssaa != 1.0 || see_through || res.window_differs()) && res.supersample(device, encoder, cb, see_through);
         res.ss_key = res.ss_ready.then_some(key);
     }
@@ -3638,14 +3594,7 @@ impl Renderer {
         pass.set_bind_group(0, scene_bind(m, &res.bind), &[]);
         tris(pass, &res.pbr, &m.pbr);
         if !cb.product {
-            for (_, b) in res.clouds.values() {
-                pass.set_pipeline(&res.point);
-                for (buffer, count) in &b.parts {
-                    pass.set_vertex_buffer(0, buffer.slice(..));
-                    pass.draw(0..6, 0..*count);
-                    tally.triangles(6, *count);
-                }
-            }
+            res.clouds.paint(pass, &res.cloud_pipes, tally);
         }
         // Whole-body tints first, so a face or an edge highlighted over the body (in `h.tris`
         // and `h.lines`) keeps its own colour, as it did when the body's triangles were built
@@ -4326,7 +4275,7 @@ mod tests {
             clip: [0.0; 4],
             cap: [0.0; 4],
             images: Vec::new(),
-            points: Vec::new(),
+            clouds: Vec::new(),
             analysis: [0.0; 8],
             analysis_colors: [0.0; 36],
             access: None,
@@ -4712,7 +4661,7 @@ mod glass_tests {
             clip: [0.0; 4],
             cap: [0.0; 4],
             images: Vec::new(),
-            points: Vec::new(),
+            clouds: Vec::new(),
             analysis: [0.0; 8],
             analysis_colors: [0.0; 36],
             access: None,
@@ -4886,7 +4835,7 @@ mod glass_tests {
             clip: [0.0; 4],
             cap: [0.0; 4],
             images: Vec::new(),
-            points: Vec::new(),
+            clouds: Vec::new(),
             analysis: [0.0; 8],
             analysis_colors: [0.0; 36],
             access: None,
@@ -4911,28 +4860,38 @@ mod glass_tests {
     }
 
     #[test]
-    fn a_cached_point_cloud_picture_updates_after_recoloring_and_hiding() {
+    fn a_cached_cloud_picture_follows_its_style_without_uploading_again() {
         let Some((_, device, queue)) = crate::open_headless().ok() else { return };
         let depth = crate::depth_format(&device, true);
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let mut renderer = Renderer::new(&device, GpuTarget { format, depth: Some(depth), samples: 1, tess: false, oit: false }, None);
         let mut frame = test_frame(GpuScene::default(), 2.0);
-        let mut bytes = Vec::new();
-        cloud_point(&mut bytes, [0.0; 3], [255, 0, 0], 20.0);
-        frame.points.push(GpuPoints { id: 1, version: 1, bytes: Arc::new(bytes) });
-        let red = render_frame(&mut renderer, &device, &queue, &frame, true);
-        assert!(red.as_chunks::<4>().0.iter().any(|p| p[0] > 200 && p[1] < 30 && p[2] < 30), "the cloud is drawn");
-        render_frame(&mut renderer, &device, &queue, &frame, true);
-        assert!(renderer.cached.is_some());
-        let mut bytes = Vec::new();
-        cloud_point(&mut bytes, [0.0; 3], [0, 0, 255], 20.0);
-        frame.points = vec![GpuPoints { id: 1, version: 2, bytes: Arc::new(bytes) }];
-        let blue = render_frame(&mut renderer, &device, &queue, &frame, true);
-        assert!(blue.as_chunks::<4>().0.iter().any(|p| p[0] < 30 && p[1] < 30 && p[2] > 200), "the edited cloud replaces the cached picture");
-        assert_ne!(red, blue);
-        frame.points.clear();
+        // A dot (labelled 2, red in the palette) and a bead across the view (value 1, filtered 5).
+        let mut dots = Vec::new();
+        cloud_cell(&mut dots, &Cell { corners: [[5.0, 5.0, 0.0]; 3], rgb: [0, 0, 255], value: [2.0; 3], has: 4, ..Default::default() });
+        let mut segments = Vec::new();
+        let ends = [[-3.0, -3.0, 0.0], [3.0, -3.0, 0.0], [3.0, -3.0, 0.0]];
+        let bead = Cell { corners: ends, value: [1.0; 3], filtered: [[5.0; 3], [0.0; 3]], size: [0.2, 0.2], rgb: [0, 255, 0], has: 0b101 };
+        cloud_cell(&mut segments, &bead);
+        let style = CloudStyle { mode: ColorMode::Own, range: [0.0, 1.0], filters: [NO_FILTER; 2], point_size: 20.0 };
+        let empty = Arc::new(Vec::new());
+        frame.clouds.push(GpuCloud { id: 1, version: 1, dots: Arc::new(dots), segments: Arc::new(segments), triangles: empty, style });
+        let own = render_frame(&mut renderer, &device, &queue, &frame, true);
+        let has = |img: &[u8], f: &dyn Fn(&[u8; 4]) -> bool| img.as_chunks::<4>().0.iter().any(f);
+        assert!(has(&own, &|p| p[2] > 200 && p[0] < 30), "the dot in its own colour");
+        assert!(has(&own, &|p| p[1] > 120 && p[0] < 30 && p[2] < 30), "the bead in its own colour");
+        frame.clouds[0].style.mode = ColorMode::Palette;
+        let palette = render_frame(&mut renderer, &device, &queue, &frame, true);
+        assert!(has(&palette, &|p| p[0] > 200 && p[1] < 90 && p[2] < 90), "label 2 in the palette's red");
+        frame.clouds[0].style.filters[0] = [0.0, 4.0];
+        let filtered = render_frame(&mut renderer, &device, &queue, &frame, true);
+        assert!(
+            !has(&filtered, &|p| p[1] > 120 && p[0] < 30 && p[2] < 30) && has(&filtered, &|p| p[0] > 200 && p[1] < 90),
+            "the bead is filtered out, the dot has no such value"
+        );
+        frame.clouds.clear();
         let hidden = render_frame(&mut renderer, &device, &queue, &frame, true);
-        assert!(!hidden.as_chunks::<4>().0.iter().any(|p| p[0] < 30 && p[1] < 30 && p[2] > 200), "hiding the cloud removes its dots");
+        assert!(!has(&hidden, &|p| p[0] > 200 && p[1] < 90 && p[2] < 90), "hiding the cloud removes it");
     }
 
     /// A still view shows the picture it drew last: a reused frame (whose filtered picture is

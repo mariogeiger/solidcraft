@@ -3,7 +3,7 @@
 
 use serde_json::{Value, json};
 use solidcraft_doc::Mat;
-use solidcraft_doc::point_cloud::{ColorBy, Colors, MAX_COORD, MAX_POINTS, POINT_SIZE, PointCloud, Points, UNITS, unit_scale};
+use solidcraft_doc::point_cloud::{ColorBy, Colors, Filter, MAX_COORD, MAX_FILTERS, MAX_POINTS, POINT_SIZE, PointCloud, Points, UNITS, unit_scale};
 
 use super::CommandSpec;
 use crate::params::{bad, bool_, str_};
@@ -17,6 +17,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("pointcloud.edit", "Edit Point Cloud", edit)
         .icon("edit")
         .params("cloud: id or name; name?; visible?; point_size?: pixels (0.5…16); color_by?: file|single|height (the file's colours, the default; one colour; or a ramp by height, blue low to red high); color?: [r, g, b] 0…1 (the single colour; given alone it sets color_by single, null sets color_by file); height_range?: [low, high] design Z in mm for the height ramp, or null to work it out from the points (all but the lowest and highest 2 %); units?: mm|cm|m|in|ft (the file's length unit: the points are scaled from the unit they came in as); matrix?: [12 or 16 numbers] (where the cloud sits: a rigid row-major 3x4 or 4x4 matrix, as occurrence.move takes it); tolerance? → cloud"),
+    CommandSpec::new("pointcloud.reload", "Reload Point Cloud", reload)
+        .icon("import")
+        .params("cloud: id or name (its file is read again from where it was inserted; name, placement, units, colouring and the filters on properties it still has are kept) → cloud, points, segments, triangles, warnings"),
     CommandSpec::new("pointcloud.delete", "Delete Point Cloud", delete).icon("delete").params("cloud: id or name → deleted"),
     CommandSpec::new("pointcloud.list", "Point Clouds", list)
         .icon("list")
@@ -64,18 +67,56 @@ fn color(p: &Value, cmd: &str) -> Result<Option<Option<[f32; 3]>>> {
     }
 }
 
-/// `color_by`: absent (`None`), or file, single or height.
-fn color_by(p: &Value, cmd: &str) -> Result<Option<ColorBy>> {
+/// `color_by`: absent (`None`), file, single or height, or the name of a property.
+fn color_by(p: &Value, cmd: &str) -> Result<Option<(ColorBy, Option<String>)>> {
     match p.get("color_by") {
         None | Some(Value::Null) => Ok(None),
-        Some(v) => v.as_str().and_then(ColorBy::parse).map(Some).ok_or_else(|| bad(cmd, "`color_by` must be file, single or height")),
+        Some(Value::String(v)) => Ok(Some(match ColorBy::parse(v) {
+            Some(b) if b != ColorBy::Property => (b, None),
+            _ => (ColorBy::Property, Some(v.clone())),
+        })),
+        Some(_) => Err(bad(cmd, "`color_by` must be file, single, height or a property's name")),
     }
+}
+
+/// `filters`: absent (`None`), null for none, or [{property, range: [low, high]}].
+fn filters(p: &Value, cmd: &str) -> Result<Option<Vec<Filter>>> {
+    let refuse = || bad(cmd, format!("`filters` must be at most {MAX_FILTERS} {{property, range: [low, high]}}, lowest first, or null"));
+    match p.get("filters") {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(Vec::new())),
+        Some(Value::Array(a)) if a.len() <= MAX_FILTERS => a
+            .iter()
+            .map(|f| {
+                let property = f.get("property").and_then(Value::as_str).ok_or_else(refuse)?.to_string();
+                match f.get("range").and_then(Value::as_array).map(|r| r.iter().map(Value::as_f64).collect::<Option<Vec<f64>>>()) {
+                    Some(Some(r)) if matches!(r.as_slice(), &[lo, hi] if lo.is_finite() && hi.is_finite() && lo <= hi) => {
+                        Ok(Filter { property, range: [r[0], r[1]] })
+                    }
+                    _ => Err(refuse()),
+                }
+            })
+            .collect::<Result<Vec<Filter>>>()
+            .map(Some),
+        Some(_) => Err(refuse()),
+    }
+}
+
+/// A cloud colours and filters only by properties it has.
+fn check_properties(c: &PointCloud, cmd: &str) -> Result<()> {
+    let names: Vec<&str> = c.property_names().collect();
+    for n in c.color_property.iter().filter(|_| c.color_by == ColorBy::Property).chain(c.filters.iter().map(|f| &f.property)) {
+        if !names.contains(&n.as_str()) {
+            return Err(bad(cmd, format!("the point cloud has no property `{n}` (it has {})", names.join(", "))));
+        }
+    }
+    Ok(())
 }
 
 /// `height_range`: absent (`None`), null for the automatic one (`Some(None)`), or [low, high].
 fn height_range(p: &Value, cmd: &str) -> Result<Option<Option<[f64; 2]>>> {
-    let refuse = || bad(cmd, "`height_range` must be [low, high] heights in mm, lowest first, or null");
-    match p.get("height_range") {
+    let refuse = || bad(cmd, "`height_range` (or `color_range`) must be [low, high], lowest first, or null");
+    match p.get("color_range").or_else(|| p.get("height_range")) {
         None => Ok(None),
         Some(Value::Null) => Ok(Some(None)),
         Some(Value::Array(a)) => match a.iter().map(Value::as_f64).collect::<Option<Vec<f64>>>().as_deref() {
@@ -90,13 +131,18 @@ fn height_range(p: &Value, cmd: &str) -> Result<Option<Option<[f64; 2]>>> {
 
 /// Apply `color_by`, `color` and `height_range`: a colour given alone means one colour, and
 /// `color: null` the file's.
-fn set_colors(c: &mut PointCloud, by: Option<ColorBy>, color: Option<Option<[f32; 3]>>, range: Option<Option<[f64; 2]>>) {
+fn set_colors(c: &mut PointCloud, by: Option<(ColorBy, Option<String>)>, color: Option<Option<[f32; 3]>>, range: Option<Option<[f64; 2]>>) {
     if let Some(k) = color {
         c.color = k.or(c.color);
         c.color_by = if k.is_some() { ColorBy::Single } else { ColorBy::File };
     }
-    if let Some(b) = by {
+    if let Some((b, property)) = by {
+        if property != c.color_property && range.is_none() {
+            // Another property's values have another range.
+            c.height_range = None;
+        }
         c.color_by = b;
+        c.color_property = property.or(c.color_property.take().filter(|_| b == ColorBy::Property));
     }
     if let Some(r) = range {
         c.height_range = r;
@@ -142,13 +188,7 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
     let center = bool_(p, "center").unwrap_or(false);
     let bytes = solidcraft_io::vfs::read(path, solidcraft_io::MAX_POINT_CLOUD_BYTES).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     let read = solidcraft_io::read_point_cloud(&bytes, path, scale, max_points).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
-    let mut warnings = read.warnings;
-    if solidcraft_io::is_ply_path(path)
-        && let Ok((_, faces)) = solidcraft_io::ply_counts(&bytes)
-        && faces > 0
-    {
-        warnings.push(format!("the file also has {faces} faces: Insert Mesh (file.insert_mesh) reads it as a mesh"));
-    }
+    let warnings = read.warnings;
     drop(bytes);
     let file = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
     let stem = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().trim().to_string()).filter(|n| !n.is_empty());
@@ -172,8 +212,13 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
         color: None,
         height_range: None,
         visible: true,
+        cells: read.cells,
+        color_property: None,
+        filters: filters(p, cmd)?.unwrap_or_default(),
+        source: std::path::absolute(path).map(|a| a.to_string_lossy().to_string()).unwrap_or_else(|_| path.to_string()),
     };
     set_colors(&mut cloud, colors.0, colors.1, colors.2);
+    check_properties(&cloud, cmd)?;
     if center && let Some((lo, hi)) = cloud.local_bounds() {
         cloud.transform[3] = [-(lo.x + hi.x) / 2.0, -(lo.y + hi.y) / 2.0, -lo.z, 1.0];
     }
@@ -185,6 +230,8 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
         "cloud": id,
         "name": name,
         "points": cloud.len(),
+        "segments": cloud.cells.segment_count(),
+        "triangles": cloud.cells.triangle_count(),
         "source_points": cloud.source_points,
         "bounds": bounds(&cloud),
         "warnings": warnings,
@@ -207,6 +254,7 @@ fn edit(s: &mut Session, p: &Value) -> Result<Value> {
     let i = find(s, p, cmd)?;
     let size = point_size(p, cmd)?;
     let colors = (color_by(p, cmd)?, color(p, cmd)?, height_range(p, cmd)?);
+    let filters = filters(p, cmd)?;
     let units = units_of(p, cmd)?;
     let placement = match p.get("matrix") {
         None | Some(Value::Null) => None,
@@ -236,6 +284,10 @@ fn edit(s: &mut Session, p: &Value) -> Result<Value> {
         c.point_size = v;
     }
     set_colors(&mut c, colors.0, colors.1, colors.2);
+    if let Some(f) = filters {
+        c.filters = f;
+    }
+    check_properties(&c, cmd)?;
     if let Some(v) = bool_(p, "visible") {
         c.visible = v;
     }
@@ -248,6 +300,38 @@ fn edit(s: &mut Session, p: &Value) -> Result<Value> {
     let slot = s.doc_mut().point_clouds.get_mut(i).ok_or_else(|| bad(cmd, "point cloud"))?;
     *slot = c;
     Ok(json!({"cloud": id}))
+}
+
+/// Read the cloud's file again where it was read from, keeping its name, placement, units and
+/// how it is shown.
+fn reload(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "pointcloud.reload";
+    let i = find(s, p, cmd)?;
+    let mut c = s.doc.point_clouds.get(i).cloned().ok_or_else(|| bad(cmd, "point cloud"))?;
+    if c.source.is_empty() {
+        return Err(bad(cmd, format!("point cloud `{}` does not remember its file", c.name)));
+    }
+    let path = c.source.clone();
+    let scale = unit_scale(&c.units).unwrap_or(1.0);
+    let max_points = usize::try_from(c.source_points).unwrap_or(MAX_POINTS).clamp(1, MAX_POINTS).max(c.len());
+    let bytes = solidcraft_io::vfs::read(&path, solidcraft_io::MAX_POINT_CLOUD_BYTES).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+    let read = solidcraft_io::read_point_cloud(&bytes, &path, scale, max_points).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+    c.origin = read.origin;
+    c.points = Points::new(read.points.into());
+    c.colors = Colors(read.colors.into());
+    c.source_points = read.source_points;
+    c.cells = read.cells;
+    // What the file no longer has is no longer coloured or filtered by.
+    let names: Vec<String> = c.property_names().map(str::to_string).collect();
+    c.filters.retain(|f| names.contains(&f.property));
+    if c.color_by == ColorBy::Property && !c.color_property.as_ref().is_some_and(|n| names.contains(n)) {
+        (c.color_by, c.color_property) = (ColorBy::File, None);
+    }
+    c.check()?;
+    let out = json!({"cloud": c.id, "points": c.len(), "segments": c.cells.segment_count(), "triangles": c.cells.triangle_count(), "warnings": read.warnings});
+    let slot = s.doc_mut().point_clouds.get_mut(i).ok_or_else(|| bad(cmd, "point cloud"))?;
+    *slot = c;
+    Ok(out)
 }
 
 fn delete(s: &mut Session, p: &Value) -> Result<Value> {
@@ -271,7 +355,12 @@ fn list(s: &mut Session, _: &Value) -> Result<Value> {
                 "units": c.units,
                 "visible": c.visible,
                 "point_size": c.point_size,
-                "color_by": c.color_by.name(),
+                "color_by": c.colored_property().filter(|_| c.color_by == ColorBy::Property).unwrap_or(c.color_by.name()),
+                "segments": c.cells.segment_count(),
+                "triangles": c.cells.triangle_count(),
+                "properties": c.property_names().map(|n| json!({"name": n, "integer": c.cells.integer(n), "span": c.span(n)})).collect::<Vec<_>>(),
+                "filters": c.filters.iter().map(|f| json!({"property": f.property, "range": f.range})).collect::<Vec<_>>(),
+                "source": c.source,
                 "color": c.color,
                 "colored": !c.colors.is_empty(),
                 "height_range": c.height_range_now(),

@@ -697,38 +697,167 @@ fn fs_line_all(i: LOut) -> @location(0) vec4<f32> {
     return out_color(i.c);
 }
 
-// Point clouds: each point is a round dot a few pixels across, facing the screen, depth-tested
-// and written like the model's faces, so the model hides the points behind it and they hide it.
-// The colour's alpha carries the dot's size (eighths of a pixel).
+// Point clouds and their cells (`view/clouds.rs`): dots, segments as beads (or lines when they
+// have no size) and triangles, from one record per element. The cloud's style colours them by
+// their own colour, a ramp or a palette, and shows only those whose filtered values lie in its
+// ranges; values vary across an element, so a filter cuts it where its value crosses the range.
 
-struct POut {
-    @builtin(position) pos: vec4<f32>,
-    @location(0) c: vec4<f32>,
-    @location(1) wp: vec3<f32>,
-    @location(2) at: vec2<f32>,
+struct Cloud {
+    style: vec4<f32>,  // x: colour (0 own, 1 ramp, 2 palette), y: dot size (px), z, w: ramp range
+    ranges: vec4<f32>, // the two filters' ranges: low, high, low, high
+};
+@group(1) @binding(3) var<uniform> cloud: Cloud;
+
+struct CIn {
+    @location(0) a: vec3<f32>,
+    @location(1) b: vec3<f32>,
+    @location(2) c: vec3<f32>,
+    @location(3) v: vec3<f32>,
+    @location(4) f0: vec3<f32>,
+    @location(5) f1: vec3<f32>,
+    @location(6) size: vec2<f32>,
+    @location(7) rgb: vec4<f32>,
 };
 
+struct COut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) wp: vec3<f32>,
+    @location(1) n: vec3<f32>,     // zero: not lit
+    @location(2) v: f32,
+    @location(3) f: vec2<f32>,
+    @location(4) rgb: vec3<f32>,
+    @location(5) at: vec2<f32>,    // a dot's place on its disc
+    @location(6) @interpolate(flat) has: u32,
+};
+
+fn cloud_out(i: CIn, w: vec3<f32>, wp: vec3<f32>, pos: vec4<f32>, n: vec3<f32>) -> COut {
+    var o: COut;
+    o.pos = pos;
+    o.wp = wp;
+    o.n = n;
+    o.v = dot(w, i.v);
+    o.f = vec2<f32>(dot(w, i.f0), dot(w, i.f1));
+    o.rgb = i.rgb.rgb;
+    o.at = vec2<f32>(0.0);
+    o.has = u32(round(i.rgb.a * 255.0));
+    return o;
+}
+
+fn behind(c: vec4<f32>) -> bool {
+    return near_z(c) < 0.0;
+}
+
 @vertex
-fn vs_point(@builtin(vertex_index) vi: u32, @location(0) p: vec3<f32>, @location(1) c: vec4<f32>) -> POut {
+fn vs_cloud_dot(@builtin(vertex_index) vi: u32, i: CIn) -> COut {
     var xs = array<f32, 6>(-1.0, 1.0, 1.0, -1.0, 1.0, -1.0);
     var ys = array<f32, 6>(-1.0, -1.0, 1.0, -1.0, 1.0, 1.0);
     let at = vec2<f32>(xs[vi], ys[vi]);
-    let size = max(c.a * 255.0 / 8.0, 1.0);
-    let centre = u.vp * vec4<f32>(p, 1.0);
-    let half = u.screen.xy * 0.5;
-    var o: POut;
-    o.pos = vec4<f32>(centre.xy + at * size * 0.5 / half * centre.w, centre.z, centre.w);
-    // Behind the eye: nothing.
-    if (near_z(centre) < 0.0) { o.pos = vec4<f32>(0.0, 0.0, 0.0, -1.0); }
-    o.c = vec4<f32>(c.rgb, 1.0);
-    o.wp = p;
+    let size = max(cloud.style.y, 1.0);
+    let centre = u.vp * vec4<f32>(i.a, 1.0);
+    var pos = vec4<f32>(centre.xy + at * size / u.screen.xy * centre.w, centre.z, centre.w);
+    if (behind(centre)) { pos = vec4<f32>(0.0, 0.0, 0.0, -1.0); }
+    var o = cloud_out(i, vec3<f32>(1.0, 0.0, 0.0), i.a, pos, vec3<f32>(0.0));
     // Dots under two pixels are squares: a disc that small loses its centre pixel.
     o.at = at * select(1.0, 0.0, size < 2.0);
     return o;
 }
 
+/// The least half-width of a segment on screen, in pixels.
+const MIN_HALF_PX: f32 = 0.75;
+
+@vertex
+fn vs_cloud_segment(@builtin(vertex_index) vi: u32, i: CIn) -> COut {
+    // Side `q` of the bead is a quad between corners `q` and `q + 1` of the cross-section, at
+    // both ends.
+    let sides = 8u;
+    let q = vi / 6u;
+    let k = vi % 6u;
+    var step = array<u32, 6>(0u, 1u, 1u, 0u, 1u, 0u);
+    var end = array<f32, 6>(0.0, 0.0, 1.0, 0.0, 1.0, 1.0);
+    let e = end[k];
+    let theta = 6.2831853 * f32(q + step[k]) / f32(sides);
+    let d = i.b - i.a;
+    var t = vec3<f32>(1.0, 0.0, 0.0);
+    if (length(d) > 1e-9) { t = d / length(d); }
+    var side = cross(vec3<f32>(0.0, 0.0, 1.0), t);
+    if (length(side) < 1e-6) { side = vec3<f32>(1.0, 0.0, 0.0); }
+    side = normalize(side);
+    let up = cross(t, side);
+    // A stadium: half-discs of the height's radius, the width's rest flat between them.
+    let r = 0.5 * i.size.y;
+    let flat_half = 0.5 * max(i.size.x - i.size.y, 0.0);
+    let cs = cos(theta);
+    let sn = sin(theta);
+    let axis = mix(i.a, i.b, e);
+    let wp = axis + side * (sign(cs) * flat_half + r * cs) + up * (r * sn);
+    let ca = u.vp * vec4<f32>(axis, 1.0);
+    let cw = u.vp * vec4<f32>(wp, 1.0);
+    let half = u.screen.xy * 0.5;
+    let pa = u.vp * vec4<f32>(i.a, 1.0);
+    let pb = u.vp * vec4<f32>(i.b, 1.0);
+    var along = (pb.xy / pb.w - pa.xy / pa.w) * half;
+    var across = vec2<f32>(-along.y, along.x);
+    if (length(across) < 1e-6) { across = vec2<f32>(1.0, 0.0); }
+    across = normalize(across);
+    // At least a pixel and a half across: a bead seen from afar, or a line without size.
+    var px = (cw.xy / cw.w - ca.xy / ca.w) * half;
+    if (length(px) < MIN_HALF_PX * abs(cs)) { px = across * cs * MIN_HALF_PX; }
+    var pos = vec4<f32>((ca.xy / ca.w + px / half) * cw.w, cw.z, cw.w);
+    if (behind(ca)) { pos = vec4<f32>(0.0, 0.0, 0.0, -1.0); }
+    let n = select(side * cs + up * sn, vec3<f32>(0.0), i.size.y <= 0.0);
+    return cloud_out(i, vec3<f32>(1.0 - e, e, 0.0), wp, pos, n);
+}
+
+@vertex
+fn vs_cloud_triangle(@builtin(vertex_index) vi: u32, i: CIn) -> COut {
+    var w = vec3<f32>(0.0);
+    w[vi] = 1.0;
+    let wp = i.a * w.x + i.b * w.y + i.c * w.z;
+    var n = cross(i.b - i.a, i.c - i.a);
+    if (length(n) > 0.0) { n = normalize(n); }
+    var pos = u.vp * vec4<f32>(wp, 1.0);
+    if (behind(pos)) { pos = vec4<f32>(0.0, 0.0, 0.0, -1.0); }
+    return cloud_out(i, w, wp, pos, n);
+}
+
+fn cloud_ramp(t: f32) -> vec3<f32> {
+    var stops = array<vec3<f32>, 5>(
+        vec3<f32>(40.0, 70.0, 200.0), vec3<f32>(30.0, 170.0, 230.0), vec3<f32>(60.0, 200.0, 90.0),
+        vec3<f32>(240.0, 220.0, 60.0), vec3<f32>(230.0, 70.0, 50.0));
+    let k = clamp(t, 0.0, 1.0) * 4.0;
+    let j = min(u32(k), 3u);
+    return mix(stops[j], stops[j + 1u], k - f32(j)) / 255.0;
+}
+
+fn cloud_palette(v: f32) -> vec3<f32> {
+    var colours = array<vec3<f32>, 10>(
+        vec3<f32>(240.0, 140.0, 40.0), vec3<f32>(245.0, 205.0, 65.0), vec3<f32>(230.0, 65.0, 65.0),
+        vec3<f32>(165.0, 75.0, 190.0), vec3<f32>(65.0, 190.0, 115.0), vec3<f32>(75.0, 150.0, 220.0),
+        vec3<f32>(240.0, 120.0, 180.0), vec3<f32>(140.0, 105.0, 75.0), vec3<f32>(120.0, 215.0, 215.0),
+        vec3<f32>(190.0, 190.0, 80.0));
+    if (v < -0.5) { return vec3<f32>(150.0, 160.0, 176.0) / 255.0; }
+    return colours[u32(round(v)) % 10u] / 255.0;
+}
+
+fn in_range(v: f32, lo: f32, hi: f32) -> bool {
+    return v >= lo && v <= hi;
+}
+
 @fragment
-fn fs_point(i: POut) -> @location(0) vec4<f32> {
-    if (clipped(i.wp) || dot(i.at, i.at) > 1.0) { discard; }
-    return out_color(i.c);
+fn fs_cloud(o: COut) -> @location(0) vec4<f32> {
+    let f = cloud.ranges;
+    let out0 = (o.has & 1u) != 0u && !in_range(o.f.x, f.x, f.y);
+    let out1 = (o.has & 2u) != 0u && !in_range(o.f.y, f.z, f.w);
+    if (clipped(o.wp) || dot(o.at, o.at) > 1.0 || out0 || out1) { discard; }
+    var c = o.rgb;
+    let mode = cloud.style.x;
+    if ((o.has & 4u) != 0u && mode > 1.5) {
+        c = cloud_palette(o.v);
+    } else if ((o.has & 4u) != 0u && mode > 0.5) {
+        c = cloud_ramp((o.v - cloud.style.z) / max(cloud.style.w - cloud.style.z, 1e-12));
+    }
+    if (length(o.n) > 0.5) {
+        c = c * (0.45 + 0.55 * abs(dot(normalize(o.n), normalize(u.back.xyz))));
+    }
+    return out_color(vec4<f32>(c, 1.0));
 }
