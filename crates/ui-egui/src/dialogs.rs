@@ -1328,9 +1328,10 @@ impl Dialog {
             if !one && self.active_input().is_some_and(|i| i.multi) { crate::viewport::picked_selection(s, &sel) } else { vec![sel.clone()] };
         // Tangent chain: an edge brings the edges that continue it smoothly.
         let picked = if chain { fillet_edges(s, &sel, true) } else { single.clone() };
-        // Extrude and revolve take profiles of one sketch.
+        // Extrude and revolve take profiles of one sketch; both lofts take sections
+        // from several sketches and must keep their pick order.
         if let Sel::Profile { sketch, .. } = &sel
-            && !matches!(self.kind, Kind::Loft { .. })
+            && !matches!(self.kind, Kind::Loft { .. } | Kind::Surface(crate::dialogs_surface::Surf::Loft { .. }))
             && let Some(inp) = self.inputs.get_mut(self.active)
         {
             inp.items.retain(|x| !matches!(x, Sel::Profile { sketch: s2, .. } if s2 != sketch));
