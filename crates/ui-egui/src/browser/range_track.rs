@@ -451,6 +451,21 @@ pub(super) fn range_track(ui: &mut Ui, track: &Track) -> Outcome {
         }
     }
 
+    // The pointer says what a press would take: an end, the band, or a new range beside them.
+    if let Some(p) = response.hover_pos().or_else(|| st.drag.and_then(|_| response.interact_pointer_pos())) {
+        let icon = match st.drag.map(|d| d.grab) {
+            Some(Grab::Band) => egui::CursorIcon::Grabbing,
+            Some(_) => egui::CursorIcon::ResizeHorizontal,
+            None => match grab_at(on_strip(p), p.x, view, range) {
+                Some(Grab::Band) => egui::CursorIcon::Grab,
+                Some(_) => egui::CursorIcon::ResizeHorizontal,
+                None if on_strip(p) => egui::CursorIcon::PointingHand,
+                None => egui::CursorIcon::Crosshair,
+            },
+        };
+        ctx.set_cursor_icon(icon);
+    }
+
     // The strip: the whole span, the range, and the loupe framed.
     let painter = ui.painter_at(rect);
     let empty = Bars::default();
