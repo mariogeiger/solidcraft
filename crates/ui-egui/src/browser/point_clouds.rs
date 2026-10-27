@@ -276,19 +276,12 @@ pub(crate) fn panel(app: &mut SolveApp, ctx: &egui::Context) {
         stop_play = p.step(now, (b - a) / PLAY_SECONDS, span, integer);
         ctx.request_repaint();
     }
-    // The filters as the view draws them now, a playing one where it is; and how the tracks'
-    // bars are coloured, as the cloud is, and the values they snap to: where a label changes.
-    let drawn: Vec<Filter> = c
-        .filters
-        .iter()
-        .enumerate()
-        .take(DRAWN_FILTERS)
-        .map(|(k, f)| match m.playing(c.id, k) {
-            Some(range) => Filter { property: f.property.clone(), keep: Keep::Range { range } },
-            None => f.clone(),
-        })
-        .collect();
-    let paint = match (c.colored_property(), c.color_range()) {
+    // The cloud as the view draws it now, a playing filter where it is: the filters the tracks
+    // apply, how their bars are coloured, as the cloud is, and the values they snap to, where a
+    // label changes.
+    let live = crate::point_clouds::as_drawn(&c, |k| m.playing(c.id, k)).into_owned();
+    let drawn: Vec<Filter> = live.filters.iter().take(DRAWN_FILTERS).cloned().collect();
+    let paint = match (c.colored_property(), live.color_range()) {
         (Some(n), _) if c.cells.integer(n) => Paint::Palette { property: n.to_string() },
         (Some(n), Some(range)) => Paint::Ramp { property: n.to_string(), range },
         _ => Paint::One,
@@ -370,7 +363,7 @@ pub(crate) fn panel(app: &mut SolveApp, ctx: &egui::Context) {
                         }
                         // The ramp's range is a range on a track of the property, over what the
                         // filters keep; a double click beside it gives it back to the filters.
-                        let shown = c.color_range().unwrap_or(span);
+                        let shown = live.color_range().unwrap_or(span);
                         let key = colour_key(c.id);
                         let ask = Ask {
                             property: name.to_string(),
@@ -392,7 +385,9 @@ pub(crate) fn panel(app: &mut SolveApp, ctx: &egui::Context) {
                                 overview: answer.as_ref().map(|a| &a.overview),
                                 loupe: answer.as_ref().map(|a| &a.loupe),
                                 changes: &[],
-                                follow: None,
+                                // An automatic range moves with a playing filter: its moving end
+                                // stays in the loupe.
+                                follow: m.play.as_ref().filter(|_| automatic).map(|p| if p.part == Part::Low { shown[0] } else { shown[1] }),
                             },
                         );
                         if let Some(range) = out.range {

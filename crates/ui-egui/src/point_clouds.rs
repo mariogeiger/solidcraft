@@ -165,9 +165,9 @@ fn fill(cell: &mut Cell, values: [Option<[f32; 3]>; 1 + FILTERS]) {
     }
 }
 
-/// How a cloud is coloured and which of its elements are shown, as the shaders read it; a filter
-/// playing in the Edit Point Cloud card shows its range now.
-fn style(c: &PointCloud, playing: impl Fn(usize) -> Option<[f64; 2]>) -> CloudStyle {
+/// The cloud as it is drawn now: a filter `playing` in the Edit Point Cloud card at its range
+/// now, so that what follows from the filters (the ramp's automatic range) follows it too.
+pub(crate) fn as_drawn(c: &PointCloud, playing: impl Fn(usize) -> Option<[f64; 2]>) -> std::borrow::Cow<'_, PointCloud> {
     let mut c = std::borrow::Cow::Borrowed(c);
     for k in 0..c.filters.len() {
         if let Some(range) = playing(k)
@@ -176,6 +176,13 @@ fn style(c: &PointCloud, playing: impl Fn(usize) -> Option<[f64; 2]>) -> CloudSt
             f.keep = Keep::Range { range };
         }
     }
+    c
+}
+
+/// How a cloud is coloured and which of its elements are shown, as the shaders read it; a filter
+/// playing in the Edit Point Cloud card shows its range now.
+fn style(c: &PointCloud, playing: impl Fn(usize) -> Option<[f64; 2]>) -> CloudStyle {
+    let c = as_drawn(c, playing);
     let property = c.colored_property();
     let mode = match (c.color_by, property) {
         (ColorBy::File | ColorBy::Single, _) | (_, None) => ColorMode::Own,
@@ -300,6 +307,23 @@ mod tests {
         assert!(gpu_clouds(&h.app).is_empty());
         assert!(solidcraft_engine::view::bounds(&h.app.session).is_empty());
         assert!(crate::viewport::model_bounds(&h.app).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_automatic_range_follows_a_playing_filter() {
+        let mut h = crate::scenario::Harness::new();
+        let dir = std::env::temp_dir().join(format!("solidcraft-ui-cloud-play-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.ply");
+        std::fs::write(&path, "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\nproperty float t\nend_header\n0 0 0 0\n1 0 0 5\n2 0 0 10\n").unwrap();
+        let id = h.app.run("pointcloud.insert", serde_json::json!({"path": path.to_string_lossy()})).unwrap()["cloud"].as_u64().unwrap();
+        h.app.run("pointcloud.edit", serde_json::json!({"cloud": id, "color_by": "t", "filters": [{"property": "t", "range": [0, 5]}]})).unwrap();
+        let c = &h.app.session.doc.point_clouds[0];
+        assert_eq!(c.color_range(), Some([0.0, 5.0]));
+        // Played on to 8, the filter is drawn at 8, and the automatic range is worked out there.
+        let drawn = as_drawn(c, |k| (k == 0).then_some([0.0, 8.0]));
+        assert_eq!((drawn.color_range(), style(c, |k| (k == 0).then_some([0.0, 8.0])).range), (Some([0.0, 8.0]), [0.0, 8.0]));
         let _ = std::fs::remove_dir_all(dir);
     }
 }
