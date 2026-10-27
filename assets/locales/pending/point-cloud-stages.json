@@ -48,5 +48,35 @@
     "ui.point_cloud_pause": "暂停",
     "ui.point_cloud_play": "播放",
     "ui.point_cloud_reload": "从文件重新加载"
+  },
+  "ar": {
+    "cmd.pointcloud_reload": "إعادة تحميل سحابة النقاط",
+    "ui.point_cloud_add_filter": "إضافة مرشح…",
+    "ui.point_cloud_dots": "نقاط منفردة",
+    "ui.point_cloud_filter_by": "التصفية حسب",
+    "ui.point_cloud_legend_filter": "تُعرض وتُخفى في وسيلة الإيضاح أعلاه",
+    "ui.point_cloud_pause": "إيقاف مؤقت",
+    "ui.point_cloud_play": "تشغيل",
+    "ui.point_cloud_reload": "إعادة التحميل من الملف"
+  },
+  "he": {
+    "cmd.pointcloud_reload": "טעינה מחדש של ענן נקודות",
+    "ui.point_cloud_add_filter": "הוספת מסנן…",
+    "ui.point_cloud_dots": "נקודות בודדות",
+    "ui.point_cloud_filter_by": "סינון לפי",
+    "ui.point_cloud_legend_filter": "מוצגים ומוסתרים במקרא שלמעלה",
+    "ui.point_cloud_pause": "השהיה",
+    "ui.point_cloud_play": "הפעלה",
+    "ui.point_cloud_reload": "טעינה מחדש מהקובץ"
+  },
+  "vi": {
+    "cmd.pointcloud_reload": "Tải lại đám mây điểm",
+    "ui.point_cloud_add_filter": "Thêm bộ lọc…",
+    "ui.point_cloud_dots": "Điểm đơn lẻ",
+    "ui.point_cloud_filter_by": "Lọc theo",
+    "ui.point_cloud_legend_filter": "Hiện và ẩn trong chú giải ở trên",
+    "ui.point_cloud_pause": "Tạm dừng",
+    "ui.point_cloud_play": "Phát",
+    "ui.point_cloud_reload": "Tải lại từ tệp"
   }
 }
