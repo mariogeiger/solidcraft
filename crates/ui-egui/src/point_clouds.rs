@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use egui::{Painter, Shape};
 use solidcraft_engine::doc::point_cloud::Keep;
-use solidcraft_engine::doc::point_cloud::{COORDINATES, ColorBy, On, PLAIN, PointCloud, byte};
+use solidcraft_engine::doc::point_cloud::{ColorBy, On, PLAIN, PointCloud, Source, byte};
 use solidcraft_gpu::view::{Cell, CloudFilter, CloudStyle, ColorMode, FILTERS, GpuCloud, cloud_cell};
 
 use crate::SolveApp;
@@ -62,28 +62,6 @@ thread_local! {
     static VERSION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// Where a property's values come from on one kind of element.
-#[derive(Clone, Copy)]
-enum Source<'a> {
-    /// A coordinate of each corner in the design.
-    Coordinate(usize),
-    /// A column on the points: each corner's.
-    Corners(&'a [f32]),
-    /// A column on the element itself.
-    Element(&'a [f32]),
-}
-
-fn source<'a>(c: &'a PointCloud, name: Option<&str>, on: On) -> Option<Source<'a>> {
-    let name = name?;
-    if let Some(k) = COORDINATES.iter().position(|n| *n == name) {
-        return Some(Source::Coordinate(k));
-    }
-    if let Some(col) = c.cells.column(name, on) {
-        return Some(Source::Element(&col.values.0));
-    }
-    c.cells.column(name, On::Point).map(|col| Source::Corners(&col.values.0))
-}
-
 fn records(c: &PointCloud) -> Records {
     let world: Vec<[f32; 3]> = (0..c.len())
         .map(|i| {
@@ -122,7 +100,7 @@ fn records(c: &PointCloud) -> Records {
     let through = |links: &[Option<Option<usize>>], at: u32| links.get(at as usize).copied().flatten().flatten().and_then(|k| world.get(k).copied());
     for (kind, on, n) in [(1usize, On::Segment, 2usize), (2, On::Triangle, 3)] {
         let indices = if n == 2 { &cells.segments.0 } else { &cells.triangles.0 };
-        let sources = names.map(|name| source(c, name, on));
+        let sources = names.map(|name| name.and_then(|n| c.source(n, on)));
         for (e, ids) in indices.chunks_exact(n).enumerate() {
             let at = |k: usize| ids.get(k.min(n - 1)).copied().unwrap_or(0);
             let corners = [at(0), at(1), at(2)];
@@ -154,7 +132,7 @@ fn records(c: &PointCloud) -> Records {
         }
     }
     // The points drawn as dots: those no segment or triangle ends on.
-    let sources = names.map(|name| source(c, name, On::Point));
+    let sources = names.map(|name| name.and_then(|n| c.source(n, On::Point)));
     for (i, p) in world.iter().enumerate() {
         if used.get(i).copied().unwrap_or(false) {
             continue;

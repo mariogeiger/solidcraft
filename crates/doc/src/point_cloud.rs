@@ -84,6 +84,17 @@ pub struct PointCloud {
     pub source: String,
 }
 
+/// Where a property's values come from on one kind of element.
+#[derive(Clone, Copy, Debug)]
+pub enum Source<'a> {
+    /// A coordinate of each corner in the design.
+    Coordinate(usize),
+    /// A column on the points: each corner's.
+    Corners(&'a [f32]),
+    /// A column on the element itself.
+    Element(&'a [f32]),
+}
+
 /// How a cloud's points are coloured.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -141,7 +152,6 @@ pub fn height_ramp(t: f64) -> [u8; 3] {
     std::array::from_fn(|c| (a[c] * (1.0 - f) + b[c] * f).round().clamp(0.0, 255.0) as u8)
 }
 
-/// A colour channel (0..1) as a byte.
 /// Colours of whole-number labels, the label modulo their count; negative labels are grey.
 pub const PALETTE: [[u8; 3]; 10] = [
     [240, 140, 40],
@@ -163,6 +173,7 @@ pub fn label_color(v: f64) -> [u8; 3] {
     PALETTE[(v.round() as usize) % PALETTE.len()]
 }
 
+/// A colour channel (0..1) as a byte.
 pub fn byte(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * 255.0).round() as u8
 }
@@ -224,7 +235,6 @@ impl PointCloud {
         let (lo, hi) = (at(HEIGHT_TAIL)?, at(1.0 - HEIGHT_TAIL)?);
         Some(if hi - lo > 1e-9 { [lo, hi] } else { [lo - 0.5, lo + 0.5] })
     }
-    /// The heights the height ramp runs between now: the cloud's own, else the automatic ones.
     /// The property colours come from: a column, or a coordinate (`z` for the height ramp).
     pub fn colored_property(&self) -> Option<&str> {
         match self.color_by {
@@ -232,6 +242,17 @@ impl PointCloud {
             ColorBy::Property => self.color_property.as_deref(),
             ColorBy::File | ColorBy::Single => None,
         }
+    }
+    /// Where the values of `name` are on elements of kind `on`: a coordinate of each corner, a
+    /// column on the points (each corner's, varying across the element) or one on the element.
+    pub fn source(&self, name: &str, on: On) -> Option<Source<'_>> {
+        if let Some(k) = COORDINATES.iter().position(|n| *n == name) {
+            return Some(Source::Coordinate(k));
+        }
+        if let Some(col) = self.cells.column(name, on) {
+            return Some(Source::Element(&col.values.0));
+        }
+        self.cells.column(name, On::Point).map(|col| Source::Corners(&col.values.0))
     }
     /// Every property the cloud can be coloured and filtered by: its coordinates, then its columns.
     pub fn property_names(&self) -> impl Iterator<Item = &str> {
@@ -276,6 +297,7 @@ impl PointCloud {
         }
         used.iter().filter(|u| !**u).count()
     }
+    /// The heights the height ramp runs between now: the cloud's own, else the automatic ones.
     pub fn height_range_now(&self) -> Option<[f64; 2]> {
         self.height_range.or_else(|| self.auto_height_range())
     }

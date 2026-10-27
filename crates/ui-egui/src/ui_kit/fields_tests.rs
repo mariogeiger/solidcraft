@@ -389,3 +389,15 @@ fn selection_field_has_three_distinct_looks_in_every_theme() {
     crate::theme::set_custom(None);
     crate::theme::set_dark(previous);
 }
+
+#[test]
+fn a_track_number_adds_up_and_a_sign_adds_to_the_value_now() {
+    let typed = super::relative_number;
+    assert_eq!(typed("1200", 5.0), Some(1200.0));
+    assert_eq!(typed("+30", 100.0), Some(130.0));
+    assert_eq!(typed(" -30 ", 100.0), Some(70.0));
+    assert_eq!(typed("\u{2212}2,5", 10.0), Some(7.5));
+    assert_eq!(typed("0-5", 100.0), Some(-5.0));
+    assert_eq!(typed("1e-3+1", 0.0), Some(1.001));
+    assert_eq!(typed("abc", 1.0), None);
+}

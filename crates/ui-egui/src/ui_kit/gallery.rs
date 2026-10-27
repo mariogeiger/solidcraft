@@ -1177,6 +1177,9 @@ const ELEMENTS: &[Element] = &[
     element!("scalar_field", |ui, _| {
         scalar_field(ui, &mut 0.5, 0.0..=1.0);
     }),
+    element!("track_number", |ui, _| {
+        track_number(ui, &mut 1350.0, 0.5, 1);
+    }),
     element!("length_field", |ui, _| {
         length_field(ui, &mut 12.7, "in", 2);
     }),

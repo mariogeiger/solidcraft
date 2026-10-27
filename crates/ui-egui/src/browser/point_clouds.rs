@@ -1,9 +1,10 @@
 //! The Point Clouds folder of the Browser (#5151): an eye per cloud and for the folder, a menu,
 //! and the Edit Point Cloud card: the file's units, the size of the dots (when some points are
-//! dots), how the cloud is coloured (its colours, one colour, a ramp over a property or the
-//! palette of a label, with its legend), and its filters (a range on a track, played forward with
-//! ▶, or the values of a label picked in its legend). The live edits of one opening are one
-//! undo step.
+//! dots), how the cloud is coloured (its colours, one colour, a ramp over a property, its range
+//! on a track, or the palette of a label, with its legend), and its filters (a range on a track,
+//! played with ▶ or Space, or the values of a label picked in its legend). Each track shows how
+//! much of the cloud lies at each value, over what the other filters keep. The live edits of
+//! one opening are one undo step.
 
 use serde_json::{Value, json};
 use solidcraft_engine::doc::point_cloud::{COORDINATES, ColorBy, Filter, Keep, MAX_FILTERS, Names, PLAIN, PointCloud, UNITS, byte, label_color};
@@ -14,45 +15,88 @@ use crate::SolveApp;
 use crate::context_menu::{Item, Target};
 use crate::ui_kit;
 
+#[path = "point_cloud_tracks.rs"]
+mod point_cloud_tracks;
 #[path = "range_track.rs"]
 mod range_track;
-use range_track::range_track;
+use point_cloud_tracks::{Ask, Paint, Tracks};
+use range_track::{Part, Track, range_track};
 
 /// Filters the GPU applies; the others are kept but not drawn.
 pub const DRAWN_FILTERS: usize = solidcraft_gpu::view::FILTERS;
 
 /// The Edit Point Cloud card: the cloud, the undo depth when it opened, what it worked out once
-/// for the cloud's data (the automatic height range, the number of dots), and a filter playing.
+/// for the cloud's data (the automatic height range, the number of dots), its tracks' bars, and
+/// a filter playing.
 #[derive(Clone, Debug)]
 pub struct CloudPanel {
     pub cloud: u64,
     pub(crate) depth: usize,
     auto: Option<(usize, [u64; 16], Option<[f64; 2]>)>,
     dots: Option<([usize; 3], usize)>,
-    /// Each filter's playing speed, in units per second.
-    speeds: [Option<f64>; MAX_FILTERS],
+    tracks: Tracks,
     pub play: Option<Play>,
 }
 
-/// A range filter moving forward on its own: its end (when it starts at the beginning of the
-/// span), or the whole range. It is written to the design once, when it stops.
+/// A range filter moving on its own: the part of it touched last moves forward (its upper end
+/// unrolls, its band slides, its lower end wipes), across its track's loupe in [`PLAY_SECONDS`].
+/// It is written to the design once, when it stops.
 #[derive(Clone, Debug)]
 pub struct Play {
     pub filter: usize,
-    started: f64,
-    from: [f64; 2],
-    speed: f64,
-    unroll: bool,
-    /// The range now.
+    part: Part,
+    /// When it last moved, and where it is exactly.
+    at: f64,
+    exact: [f64; 2],
+    /// The range now (a whole-numbered property's ends whole).
     pub now: [f64; 2],
 }
 
-/// How long playing a filter's whole span takes by default, in seconds.
-const PLAY_SECONDS: f64 = 45.0;
+/// How long playing a filter across its track's loupe takes, in seconds: zooming in slows it.
+const PLAY_SECONDS: f64 = 20.0;
+
+/// The names of a cloud's tracks.
+fn filter_key(cloud: u64, k: usize) -> String {
+    format!("point_cloud_{cloud}_filter_{k}")
+}
+fn colour_key(cloud: u64) -> String {
+    format!("point_cloud_{cloud}_colour")
+}
+
+impl Play {
+    /// Start playing `part` of `range` within `span`, from the start again when it is at the end.
+    fn new(filter: usize, part: Part, [lo, hi]: [f64; 2], span: [f64; 2], at: f64) -> Play {
+        let exact = match part {
+            Part::High if hi >= span[1] => [lo, lo],
+            Part::Band if hi >= span[1] => [span[0], span[0] + hi - lo],
+            Part::Low if lo >= hi => [span[0], hi],
+            _ => [lo, hi],
+        };
+        Play { filter, part, at, exact, now: exact }
+    }
+    /// Move on to time `now` at `speed` units a second; whether it reached the end.
+    fn step(&mut self, now: f64, speed: f64, span: [f64; 2], integer: bool) -> bool {
+        let d = speed * (now - self.at).max(0.0);
+        self.at = now;
+        let [lo, hi] = self.exact;
+        let (exact, end) = match self.part {
+            Part::High => ([lo, (hi + d).min(span[1])], hi + d >= span[1]),
+            Part::Low => ([(lo + d).min(hi), hi], lo + d >= hi),
+            Part::Band => {
+                let w = hi - lo;
+                let start = (lo + d).min(span[1] - w);
+                ([start, start + w], lo + d >= span[1] - w)
+            }
+        };
+        self.exact = exact;
+        self.now = if integer { exact.map(f64::floor) } else { exact };
+        end
+    }
+}
 
 impl CloudPanel {
     pub fn new(app: &SolveApp, cloud: u64) -> Self {
-        CloudPanel { cloud, depth: app.session.undo.len(), auto: None, dots: None, speeds: [None; MAX_FILTERS], play: None }
+        CloudPanel { cloud, depth: app.session.undo.len(), auto: None, dots: None, tracks: Tracks::default(), play: None }
     }
     /// The cloud's automatic height range, worked out again only when its points or placement
     /// change.
@@ -100,6 +144,11 @@ fn label<'a>(c: &'a PointCloud, property: &str) -> Option<&'a Names> {
     (i64::from(hi) - i64::from(lo) < 32).then_some(names)
 }
 
+/// Bins of a track's bars: about one a point across the card.
+fn bins(ui: &egui::Ui) -> usize {
+    (ui.available_width().round() as usize).clamp(16, 1024)
+}
+
 /// The filters as `pointcloud.edit` takes them.
 fn filters_json(filters: &[Filter]) -> Vec<Value> {
     filters.iter().map(|f| serde_json::to_value(f).unwrap_or(Value::Null)).collect()
@@ -135,8 +184,8 @@ fn legend(ui: &mut egui::Ui, c: &PointCloud, names: &Names) -> Option<i32> {
     let mut clicked = None;
     for (v, name) in &names.values {
         let shown = kept.as_ref().is_none_or(|k| k.contains(v));
-        let [r, g, b] = label_color(f64::from(*v));
-        let swatch = if shown { egui::Color32::from_rgb(r, g, b) } else { egui::Color32::from_rgba_unmultiplied(r, g, b, 40) };
+        let colour = crate::theme::model_color(label_color(f64::from(*v)));
+        let swatch = if shown { colour } else { colour.gamma_multiply(0.16) };
         let response = ui
             .horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
@@ -223,18 +272,28 @@ pub(crate) fn panel(app: &mut SolveApp, ctx: &egui::Context) {
         && let Some(span) = c.filters.get(p.filter).and_then(|f| c.span(&f.property))
     {
         let integer = c.filters.get(p.filter).is_some_and(|f| c.cells.integer(&f.property));
-        let d = p.speed * (now - p.started);
-        let snap = |v: f64| if integer { v.floor() } else { v };
-        p.now = if p.unroll {
-            [p.from[0], snap((p.from[1] + d).min(span[1]))]
-        } else {
-            let width = p.from[1] - p.from[0];
-            let start = snap((p.from[0] + d).min(span[1] - width));
-            [start, start + width]
-        };
-        stop_play = p.now[1] >= span[1];
+        let [a, b] = range_track::loupe(ctx, &filter_key(c.id, p.filter), span);
+        stop_play = p.step(now, (b - a) / PLAY_SECONDS, span, integer);
         ctx.request_repaint();
     }
+    // The filters as the view draws them now, a playing one where it is; and how the tracks'
+    // bars are coloured, as the cloud is, and the values they snap to: where a label changes.
+    let drawn: Vec<Filter> = c
+        .filters
+        .iter()
+        .enumerate()
+        .take(DRAWN_FILTERS)
+        .map(|(k, f)| match m.playing(c.id, k) {
+            Some(range) => Filter { property: f.property.clone(), keep: Keep::Range { range } },
+            None => f.clone(),
+        })
+        .collect();
+    let paint = match (c.colored_property(), c.color_range()) {
+        (Some(n), _) if c.cells.integer(n) => Paint::Palette { property: n.to_string() },
+        (Some(n), Some(range)) => Paint::Ramp { property: n.to_string(), range },
+        _ => Paint::One,
+    };
+    let changes_of = c.colored_property().filter(|n| c.cells.integer(n)).map(str::to_string);
     let at = panel_pos(app);
     let (closed, action) = ui_kit::Window::new(egui::Id::new("sc_point_cloud_panel"), "point", &title)
         .placed(egui::Align2::LEFT_TOP, at)
@@ -309,9 +368,37 @@ pub(crate) fn panel(app: &mut SolveApp, ctx: &egui::Context) {
                         if ui_kit::checkbox_row(ui, "point_cloud_auto_range", crate::i18n::tr("ui.point_cloud_auto_range"), automatic) {
                             edit = Some(json!({ "cloud": c.id, "color_range": if automatic { json!(c.color_range()) } else { Value::Null } }));
                         }
-                        let now = c.color_range().unwrap_or(span);
-                        if let Some(range) = range_track(ui, "point_cloud_color_range", now, span, false) {
+                        // The ramp's range is a range on a track of the property, over what the
+                        // filters keep; a double click beside it gives it back to the filters.
+                        let shown = c.color_range().unwrap_or(span);
+                        let key = colour_key(c.id);
+                        let ask = Ask {
+                            property: name.to_string(),
+                            span,
+                            loupe: range_track::loupe(ui.ctx(), &key, span),
+                            bins: bins(ui),
+                            paint: Paint::Ramp { property: name.to_string(), range: shown },
+                            filters: drawn.clone(),
+                            changes_of: None,
+                        };
+                        let answer = m.tracks.answer(ui.ctx(), &c, &key, ask);
+                        let out = range_track(
+                            ui,
+                            &Track {
+                                key: &key,
+                                range: shown,
+                                span,
+                                integer: false,
+                                overview: answer.as_ref().map(|a| &a.overview),
+                                loupe: answer.as_ref().map(|a| &a.loupe),
+                                changes: &[],
+                                follow: None,
+                            },
+                        );
+                        if let Some(range) = out.range {
                             edit = Some(json!({ "cloud": c.id, "color_range": range }));
+                        } else if out.whole {
+                            edit = Some(json!({ "cloud": c.id, "color_range": Value::Null }));
                         }
                     }
                 }
@@ -323,25 +410,24 @@ pub(crate) fn panel(app: &mut SolveApp, ctx: &egui::Context) {
             for (k, f) in c.filters.iter().enumerate() {
                 let span = c.span(&f.property);
                 let integer = c.cells.integer(&f.property);
+                // Play or stop, by ▶ or Space on the track.
+                let mut toggle = None;
                 ui.horizontal(|ui| {
                     ui.label(crate::i18n::tr_dyn(&format!("Filter: {}", f.property)));
-                    if let (Some(range), Some(span)) = (f.range(), span) {
-                        let playing = m.play.as_ref().is_some_and(|p| p.filter == k);
-                        if ui_kit::button(ui, if playing { "⏸" } else { "▶" }, ui_kit::Button::Small).clicked() {
+                    let playing = m.play.as_ref().is_some_and(|p| p.filter == k);
+                    if let (Some(range), Some(span)) = (f.range(), span)
+                        && ui_kit::button(
+                            ui,
                             if playing {
-                                stop_play = true;
+                                format!("⏸ {}", crate::i18n::tr_label("Pause"))
                             } else {
-                                let speed = m.speeds.get(k).copied().flatten().unwrap_or((span[1] - span[0]) / PLAY_SECONDS);
-                                m.play = Some(Play { filter: k, started: now, from: range, speed, unroll: range[0] <= span[0], now: range });
-                            }
-                        }
-                        let mut speed = m.speeds.get(k).copied().flatten().unwrap_or((span[1] - span[0]) / PLAY_SECONDS);
-                        let step = speed * 0.01;
-                        if ui.add(egui::DragValue::new(&mut speed).speed(step).range(1e-9..=f64::MAX).suffix("/s").max_decimals(2)).changed()
-                            && let Some(slot) = m.speeds.get_mut(k)
-                        {
-                            *slot = Some(speed);
-                        }
+                                format!("▶ {}", crate::i18n::tr_label("Play"))
+                            },
+                            ui_kit::Button::Small,
+                        )
+                        .clicked()
+                    {
+                        toggle = Some((m.playing(c.id, k).unwrap_or(range), span));
                     }
                     if ui_kit::button(ui, "×", ui_kit::Button::Small).clicked() {
                         removed = Some(k);
@@ -364,7 +450,35 @@ pub(crate) fn panel(app: &mut SolveApp, ctx: &egui::Context) {
                     },
                     (Keep::Range { range }, Some(span)) => {
                         let shown = m.playing(c.id, k).unwrap_or(*range);
-                        if let Some(range) = range_track(ui, &format!("point_cloud_filter_{k}"), shown, span, integer)
+                        let key = filter_key(c.id, k);
+                        // The track shows what the other filters keep.
+                        let others = drawn.iter().enumerate().filter(|(j, _)| *j != k).map(|(_, f)| f.clone()).collect();
+                        let ask = Ask {
+                            property: f.property.clone(),
+                            span,
+                            loupe: range_track::loupe(ui.ctx(), &key, span),
+                            bins: bins(ui),
+                            paint: paint.clone(),
+                            filters: others,
+                            changes_of: changes_of.clone(),
+                        };
+                        let answer = m.tracks.answer(ui.ctx(), &c, &key, ask);
+                        let moving = m.play.as_ref().filter(|p| p.filter == k).map(|p| if p.part == Part::Low { shown[0] } else { shown[1] });
+                        let out = range_track(
+                            ui,
+                            &Track {
+                                key: &key,
+                                range: shown,
+                                span,
+                                integer,
+                                overview: answer.as_ref().map(|a| &a.overview),
+                                loupe: answer.as_ref().map(|a| &a.loupe),
+                                changes: answer.as_ref().map_or(&[][..], |a| &a.changes[..]),
+                                follow: moving,
+                            },
+                        );
+                        let moved = out.range.or(out.whole.then_some(span));
+                        if let Some(range) = moved
                             && let Some(slot) = filters.get_mut(k)
                         {
                             slot.keep = Keep::Range { range };
@@ -374,8 +488,26 @@ pub(crate) fn panel(app: &mut SolveApp, ctx: &egui::Context) {
                                 m.play = None;
                             }
                         }
+                        if out.play {
+                            toggle = Some((moved.unwrap_or(shown), span));
+                        }
                     }
                     (Keep::Range { .. }, None) => {}
+                }
+                if let Some((range, span)) = toggle {
+                    if m.play.as_ref().is_some_and(|p| p.filter == k) {
+                        stop_play = true;
+                    } else {
+                        // Another filter playing stops where it is.
+                        if let Some(p) = m.play.take()
+                            && let Some(slot) = filters.get_mut(p.filter)
+                        {
+                            slot.keep = Keep::Range { range: p.now };
+                            changed = true;
+                        }
+                        let part = range_track::last_part(ui.ctx(), &filter_key(c.id, k));
+                        m.play = Some(Play::new(k, part, range, span, now));
+                    }
                 }
             }
             if let Some(k) = removed {
@@ -469,6 +601,101 @@ mod tests {
         h.frames(2);
         assert!(h.app.tree.cloud_panel.is_none());
         assert_eq!(h.app.session.doc.point_clouds.len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A PLY file of ten segments along x, `t` running 0 to 10 along them and two segments to a
+    /// layer: the layer changes at t = 2, 4, 6 and 8.
+    fn layered_segments(dir: &std::path::Path) -> std::path::PathBuf {
+        let mut ply = String::from(
+            "ply\nformat ascii 1.0\nelement vertex 11\nproperty float x\nproperty float y\nproperty float z\nproperty float t\n\
+             element edge 10\nproperty int vertex1\nproperty int vertex2\nproperty int layer\nend_header\n",
+        );
+        for i in 0..=10 {
+            ply += &format!("{i} 0 0 {i}\n");
+        }
+        for i in 0..10 {
+            ply += &format!("{i} {} {}\n", i + 1, i / 2);
+        }
+        let path = dir.join("layers.ply");
+        std::fs::write(&path, ply).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_filter_track_draws_snaps_steps_frames_and_plays() {
+        let mut h = crate::scenario::Harness::new();
+        h.app.home.open = false;
+        let dir = std::env::temp_dir().join(format!("solidcraft-browser-track-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = layered_segments(&dir);
+        let id = h.app.run("pointcloud.insert", json!({"path": path.to_string_lossy()})).unwrap()["cloud"].as_u64().unwrap();
+        h.app.run("pointcloud.edit", json!({"cloud": id, "color_by": "layer", "filters": [{"property": "t", "range": [2.0, 5.0]}]})).unwrap();
+        h.app.tree.cloud_panel = Some(super::CloudPanel::new(&h.app, id));
+        let key = super::filter_key(id, 0);
+        let range = |h: &crate::scenario::Harness| h.app.session.doc.point_clouds[0].filters[0].range().unwrap();
+        // The bars come from the worker: wait for them, and for the layer changes to snap to.
+        let mut bars = None;
+        for _ in 0..200 {
+            h.frames(1);
+            bars = crate::scenario::rect_of(&format!("range_track:{key}:bars"));
+            if bars.is_some() && h.app.tree.cloud_panel.as_ref().is_some_and(|m| m.tracks.answered(&key)) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        h.frames(2);
+        let r = bars.expect("the track is drawn");
+        let x = |t: f64| f64::from(r.left()) + t / 10.0 * f64::from(r.width());
+        let y = f64::from(r.center().y);
+        let drag = |h: &mut crate::scenario::Harness, a: f64, b: f64| {
+            h.call("ui.drag", json!({"x0": x(a), "y0": y, "x1": x(b), "y1": y, "steps": 8}));
+            h.frames(2);
+        };
+        // Drawn beside the range: a new range, its start snapped to the layer change at 6.
+        drag(&mut h, 6.04, 8.9);
+        let [lo, hi] = range(&h);
+        assert!(lo == 6.0 && (hi - 8.9).abs() < 0.05, "{lo} {hi}");
+        // Its end dragged near 8 snaps to it; its start, far from any change, does not.
+        drag(&mut h, 8.9, 7.97);
+        drag(&mut h, 6.0, 6.5);
+        let [lo, hi] = range(&h);
+        assert!((lo - 6.5).abs() < 0.05 && hi == 8.0, "{lo} {hi}");
+        // ← steps the start, touched last, to the change before it, then the one before that.
+        for _ in 0..2 {
+            h.call("ui.key", json!({"key": "ArrowLeft"}));
+            h.frames(2);
+        }
+        assert_eq!(range(&h), [4.0, 8.0]);
+        // A double click on the range frames the loupe on it; beside it, the whole span.
+        h.call("ui.click", json!({"x": x(6.0), "y": y, "double": true}));
+        h.frames(2);
+        let [a, b] = super::range_track::loupe(&h.ctx, &key, [0.0, 10.0]);
+        assert!(a > 3.0 && a < 4.0 && b > 8.0 && b < 9.0, "{a} {b}");
+        // A double click on the strip above shows the whole span again; beside the range, the
+        // range becomes the whole span.
+        // (Past the double click's time, so that it is not a third click.)
+        h.frames(30);
+        let strip = crate::scenario::rect_of(&format!("range_track:{key}:strip")).unwrap();
+        h.call("ui.click", json!({"x": f64::from(strip.center().x), "y": f64::from(strip.center().y), "double": true}));
+        h.frames(2);
+        assert_eq!(super::range_track::loupe(&h.ctx, &key, [0.0, 10.0]), [0.0, 10.0]);
+        h.frames(30);
+        h.call("ui.click", json!({"x": x(9.5), "y": y, "double": true}));
+        h.frames(2);
+        assert_eq!(range(&h), [0.0, 10.0]);
+        // Space plays the part touched last (here the end, unrolling), written once when it stops.
+        drag(&mut h, 10.0, 7.0);
+        assert!((range(&h)[1] - 7.0).abs() < 0.05);
+        h.call("ui.key", json!({"key": "Space"}));
+        h.frames(2);
+        assert!(h.app.tree.cloud_panel.as_ref().unwrap().play.is_some());
+        h.frames(20);
+        h.call("ui.key", json!({"key": "Space"}));
+        h.frames(2);
+        assert!(h.app.tree.cloud_panel.as_ref().unwrap().play.is_none());
+        let [lo, hi] = range(&h);
+        assert!(lo == 0.0 && hi > 7.0 && hi < 10.0, "played on from 7: {hi}");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

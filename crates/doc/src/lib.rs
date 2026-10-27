@@ -54,6 +54,7 @@ mod piece_names;
 pub mod pipe_thread_catalog;
 pub mod point_cloud;
 mod point_cloud_cells;
+pub mod point_cloud_distribution;
 mod points;
 mod profile_refs;
 pub mod progress;
