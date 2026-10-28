@@ -9,9 +9,11 @@ use std::sync::Arc;
 use egui::{Painter, Shape};
 use solidcraft_engine::doc::point_cloud::Keep;
 use solidcraft_engine::doc::point_cloud::{ColorBy, On, PLAIN, PointCloud, Source, byte};
+use solidcraft_engine::doc::point_cloud_distribution::color_range_by;
 use solidcraft_gpu::view::{Cell, CloudFilter, CloudStyle, ColorMode, FILTERS, GpuCloud, cloud_cell};
 
 use crate::SolveApp;
+use crate::browser::point_cloud_tracks::{Ask, Paint, Tracks};
 use crate::viewport::Proj;
 
 /// Most points the CPU viewport draws of all clouds together.
@@ -60,6 +62,27 @@ thread_local! {
     /// Records by cloud id: what they were made from, their version and bytes.
     static RECORDS: RefCell<HashMap<u64, (Key, u64, Records)>> = RefCell::new(HashMap::new());
     static VERSION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// By cloud id, the values its coloured property takes over what is kept, worked out off the
+    /// frame (one worker a cloud, so that each keeps its own geometry).
+    static EXTENTS: RefCell<HashMap<u64, Tracks>> = RefCell::new(HashMap::new());
+}
+
+/// The ramp's range of `c` as drawn ([`as_drawn`]): the one set, else, by a property, exactly
+/// the values it takes over what the drawn filters keep. Worked out off the frame: until then,
+/// the last answer, or the cloud's own bound.
+pub(crate) fn color_range(ctx: &egui::Context, c: &PointCloud) -> Option<[f64; 2]> {
+    color_range_by(c, |property, axis| {
+        let ask = Ask {
+            property: property.to_string(),
+            span: axis,
+            loupe: axis,
+            bins: 1,
+            paint: Paint::One,
+            filters: c.filters.iter().take(FILTERS).cloned().collect(),
+            changes_of: None,
+        };
+        EXTENTS.with(|e| e.borrow_mut().entry(c.id).or_default().answer(ctx, c, "extent", ask)).and_then(|a| a.extent)
+    })
 }
 
 fn records(c: &PointCloud) -> Records {
@@ -181,7 +204,7 @@ pub(crate) fn as_drawn(c: &PointCloud, playing: impl Fn(usize) -> Option<[f64; 2
 
 /// How a cloud is coloured and which of its elements are shown, as the shaders read it; a filter
 /// playing in the Edit Point Cloud card shows its range now.
-fn style(c: &PointCloud, playing: impl Fn(usize) -> Option<[f64; 2]>) -> CloudStyle {
+fn style(ctx: &egui::Context, c: &PointCloud, playing: impl Fn(usize) -> Option<[f64; 2]>) -> CloudStyle {
     let c = as_drawn(c, playing);
     let property = c.colored_property();
     let mode = match (c.color_by, property) {
@@ -205,13 +228,14 @@ fn style(c: &PointCloud, playing: impl Fn(usize) -> Option<[f64; 2]>) -> CloudSt
             }
         };
     }
-    let range = c.color_range().unwrap_or([0.0, 1.0]).map(|v| v as f32);
+    let range = color_range(ctx, &c).unwrap_or([0.0, 1.0]).map(|v| v as f32);
     CloudStyle { mode, range, filters, point_size: c.point_size as f32 }
 }
 
 /// The shown point clouds as the GPU draws them.
-pub fn gpu_clouds(app: &SolveApp) -> Vec<GpuCloud> {
+pub fn gpu_clouds(app: &SolveApp, ctx: &egui::Context) -> Vec<GpuCloud> {
     let doc = &app.session.doc;
+    EXTENTS.with(|e| e.borrow_mut().retain(|id, _| doc.point_clouds.iter().any(|c| c.id == *id)));
     RECORDS.with(|m| {
         let mut m = m.borrow_mut();
         m.retain(|id, _| doc.point_clouds.iter().any(|c| c.id == *id));
@@ -231,7 +255,7 @@ pub fn gpu_clouds(app: &SolveApp) -> Vec<GpuCloud> {
                     }
                 };
                 let playing = |k: usize| app.tree.cloud_panel.as_ref().and_then(|p| p.playing(c.id, k));
-                GpuCloud { id: c.id, version, dots, segments, triangles, style: style(c, playing) }
+                GpuCloud { id: c.id, version, dots, segments, triangles, style: style(ctx, c, playing) }
             })
             .collect()
     })
@@ -251,7 +275,7 @@ pub fn show(app: &SolveApp, painter: &Painter, proj: &Proj) {
     let mut shapes = Vec::new();
     for c in clouds {
         let r = (c.point_size as f32 / painter.ctx().pixels_per_point() * 0.5).max(0.5);
-        let shade = c.shade();
+        let shade = c.shade(color_range(painter.ctx(), c));
         for i in (0..c.len()).step_by(stride) {
             let Some(p) = c.world_point(i) else { continue };
             let Some(q) = proj.to_screen(p) else { continue };
@@ -278,7 +302,7 @@ mod tests {
         assert!(!crate::browser::is_open(&h.app, "point_clouds", true));
         h.app.run("browser.expand_all", serde_json::json!({})).unwrap();
         assert!(crate::browser::is_open(&h.app, "point_clouds", true));
-        let first = gpu_clouds(&h.app);
+        let first = gpu_clouds(&h.app, &h.ctx);
         assert_eq!(first.len(), 1);
         let size = solidcraft_gpu::view::CELL_SIZE;
         assert_eq!((first[0].dots.len(), first[0].segments.len()), (2 * size, 0));
@@ -286,17 +310,17 @@ mod tests {
         assert_eq!(&first[0].dots[size..size + 4], &10f32.to_le_bytes());
         assert_eq!(&first[0].dots[2 * size - 4..2 * size - 1], &[0, 255, 0]);
         assert_eq!(first[0].style.point_size, 3.0);
-        assert_eq!(gpu_clouds(&h.app)[0].version, first[0].version, "unchanged: the same records");
+        assert_eq!(gpu_clouds(&h.app, &h.ctx)[0].version, first[0].version, "unchanged: the same records");
         h.app.run("pointcloud.edit", serde_json::json!({"cloud": id, "color": [0, 0, 1]})).unwrap();
-        let blue = gpu_clouds(&h.app);
+        let blue = gpu_clouds(&h.app, &h.ctx);
         assert_ne!(blue[0].version, first[0].version);
         assert_eq!(&blue[0].dots[size - 4..size - 1], &[0, 0, 255]);
         // By height: a ramp over the range, the range a style alone.
         h.app.run("pointcloud.edit", serde_json::json!({"cloud": id, "color_by": "height", "height_range": [0, 1]})).unwrap();
-        let ramp = gpu_clouds(&h.app);
+        let ramp = gpu_clouds(&h.app, &h.ctx);
         assert_eq!((ramp[0].style.mode, ramp[0].style.range), (ColorMode::Ramp, [0.0, 1.0]));
         h.app.run("pointcloud.edit", serde_json::json!({"cloud": id, "height_range": [0, 2]})).unwrap();
-        let wider = gpu_clouds(&h.app);
+        let wider = gpu_clouds(&h.app, &h.ctx);
         assert_eq!((wider[0].version, wider[0].style.range), (ramp[0].version, [0.0, 2.0]), "a new range uploads nothing");
         // Hidden, alone or with its folder: nothing drawn; the view frames it while shown.
         assert!(!solidcraft_engine::view::bounds(&h.app.session).is_empty());
@@ -304,26 +328,38 @@ mod tests {
         assert!(!first_bounds.is_empty());
         assert_eq!(crate::viewport::model_bounds(&h.app), first_bounds, "cached sketch bounds keep the point cloud extent");
         h.app.run("pointcloud.edit", serde_json::json!({"cloud": id, "visible": false})).unwrap();
-        assert!(gpu_clouds(&h.app).is_empty());
+        assert!(gpu_clouds(&h.app, &h.ctx).is_empty());
         assert!(solidcraft_engine::view::bounds(&h.app.session).is_empty());
         assert!(crate::viewport::model_bounds(&h.app).is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn an_automatic_range_follows_a_playing_filter() {
+    fn an_automatic_range_is_what_is_kept_and_follows_a_playing_filter() {
         let mut h = crate::scenario::Harness::new();
         let dir = std::env::temp_dir().join(format!("solidcraft-ui-cloud-play-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.ply");
-        std::fs::write(&path, "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\nproperty float t\nend_header\n0 0 0 0\n1 0 0 5\n2 0 0 10\n").unwrap();
+        // One segment, x and t both running 0 to 10 along it.
+        let ply = "ply\nformat ascii 1.0\nelement vertex 2\nproperty float x\nproperty float y\nproperty float z\nproperty float t\n\
+                   element edge 1\nproperty int vertex1\nproperty int vertex2\nend_header\n0 0 0 0\n10 0 0 10\n0 1\n";
+        std::fs::write(&path, ply).unwrap();
         let id = h.app.run("pointcloud.insert", serde_json::json!({"path": path.to_string_lossy()})).unwrap()["cloud"].as_u64().unwrap();
-        h.app.run("pointcloud.edit", serde_json::json!({"cloud": id, "color_by": "t", "filters": [{"property": "t", "range": [0, 5]}]})).unwrap();
-        let c = &h.app.session.doc.point_clouds[0];
-        assert_eq!(c.color_range(), Some([0.0, 5.0]));
-        // Played on to 8, the filter is drawn at 8, and the automatic range is worked out there.
-        let drawn = as_drawn(c, |k| (k == 0).then_some([0.0, 8.0]));
-        assert_eq!((drawn.color_range(), style(c, |k| (k == 0).then_some([0.0, 8.0])).range), (Some([0.0, 8.0]), [0.0, 8.0]));
+        // Filtered by x, not by t: the range is what is kept of t, 2 to 4, once worked out.
+        h.app.run("pointcloud.edit", serde_json::json!({"cloud": id, "color_by": "t", "filters": [{"property": "x", "range": [2, 4]}]})).unwrap();
+        let range = |h: &crate::scenario::Harness, playing: Option<[f64; 2]>| style(&h.ctx, &h.app.session.doc.point_clouds[0], |_| playing).range;
+        let settle = |h: &crate::scenario::Harness, playing: Option<[f64; 2]>, want: [f32; 2]| {
+            (0..500).any(|_| {
+                let ok = range(h, playing) == want;
+                if !ok {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                ok
+            })
+        };
+        assert!(settle(&h, None, [2.0, 4.0]), "{:?}", range(&h, None));
+        // Played on to 8, the filter is drawn there, and the range follows it.
+        assert!(settle(&h, Some([2.0, 8.0]), [2.0, 8.0]), "{:?}", range(&h, Some([2.0, 8.0])));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

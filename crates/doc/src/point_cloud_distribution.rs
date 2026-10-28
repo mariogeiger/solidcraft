@@ -11,9 +11,10 @@
 //! parts whose rounded value it holds; the colour sorts the parts into the colours they are drawn
 //! in. Each part spreads its measure exactly over the values it covers of the histogram's
 //! property: a dot's at one value, a segment's evenly, a triangle's as the tent its corners'
-//! values make.
+//! values make. The values the parts kept take, from the least to the greatest, are the ramp's
+//! automatic range: the colours span exactly what is shown.
 
-use crate::point_cloud::{Filter, Keep, On, PALETTE, PointCloud, Source};
+use crate::point_cloud::{ColorBy, Filter, Keep, On, PALETTE, PointCloud, Source};
 
 /// Most bins of one histogram.
 pub const MAX_BINS: usize = 8192;
@@ -129,6 +130,8 @@ pub struct Histogram {
     pub bins: usize,
     /// `slots[s][b]`: the measure of slot `s` in bin `b`.
     pub slots: Vec<Vec<f64>>,
+    /// The least and the greatest value the parts kept take, within the axis or not.
+    pub extent: Option<[f64; 2]>,
 }
 
 /// Where a linear function is cut into bands, by increasing values.
@@ -451,6 +454,7 @@ pub fn histogram(
     let kept: Vec<Kept> = filters.iter().map(Kept::of).collect();
     let (colour_cut, plain) = (colour.cut(), slots - 1);
     let (mut parts, mut next) = (Vec::new(), Vec::new());
+    let mut extent = None;
     for (on, elements) in kinds(c, g) {
         let Some(p) = c.source(property, on) else { continue };
         let filtered: Vec<Option<Source>> = filters.iter().map(|f| c.source(&f.property, on)).collect();
@@ -483,6 +487,12 @@ pub fn histogram(
             let pv = corners(p, e, ids, &g.world);
             let colour_values = coloured.map(|s| corners(s, e, ids, &g.world));
             for part in &parts {
+                // A linear function is least and greatest at a part's corners.
+                for v in part_values(part, pv) {
+                    if v.is_finite() {
+                        extent = Some(extent.map_or([v, v], |[lo, hi]: [f64; 2]| [lo.min(v), hi.max(v)]));
+                    }
+                }
                 match (colour_cut, colour_values) {
                     (Some(cut), Some(f)) => split(part, f, cut, |band, q| spread(&mut out, colour.slot(band), &q, pv, m)),
                     (Some(_), None) => spread(&mut out, plain, part, pv, m),
@@ -491,7 +501,40 @@ pub fn histogram(
             }
         }
     }
-    Some(Histogram { bins, slots: out.finish(slots) })
+    Some(Histogram { bins, slots: out.finish(slots), extent })
+}
+
+/// The values a linear function `f` takes at a part's corners.
+fn part_values(part: &Part, f: [f64; 3]) -> impl Iterator<Item = f64> + '_ {
+    let (ends, corners): (Option<[f64; 2]>, &[[f64; 2]]) = match part {
+        Part::Dot => (Some([f[0], f[0]]), &[]),
+        Part::Stretch([s0, s1]) => (Some([at(f, [*s0, 0.0]), at(f, [*s1, 0.0])]), &[]),
+        Part::Polygon(p) => (None, p.corners()),
+    };
+    ends.into_iter().flatten().chain(corners.iter().map(move |c| at(f, *c)))
+}
+
+/// A range for a ramp from the values it spans: a single value gets one unit around it.
+pub fn ramp_range([lo, hi]: [f64; 2]) -> [f64; 2] {
+    if hi > lo { [lo, hi] } else { [lo - 0.5, lo + 0.5] }
+}
+
+/// The ramp's range: the one set; else, coloured by a property, exactly the values it takes over
+/// what `filters` keep (the cloud's own bound, [`PointCloud::color_range`], when nothing is
+/// kept); coloured by height, the cloud's own (its points but the highest and lowest few).
+pub fn color_range(c: &PointCloud, g: &Geometry, filters: &[Filter]) -> Option<[f64; 2]> {
+    color_range_by(c, |property, axis| histogram(c, g, property, axis, 1, &Colour::One, filters).and_then(|h| h.extent))
+}
+
+/// [`color_range`], with the values the coloured property takes over what is kept given by
+/// `extent` (of the property and an axis over its span): worked out elsewhere, or not yet.
+pub fn color_range_by(c: &PointCloud, extent: impl FnOnce(&str, [f64; 2]) -> Option<[f64; 2]>) -> Option<[f64; 2]> {
+    let property = c.colored_property()?;
+    if c.height_range.is_some() || c.color_by != ColorBy::Property {
+        return c.color_range();
+    }
+    let axis = ramp_range(c.span(property)?);
+    extent(property, axis).map(ramp_range).or_else(|| c.color_range())
 }
 
 /// Spread a part's measure (`m`, the whole element's share) over the values `f` takes on it.

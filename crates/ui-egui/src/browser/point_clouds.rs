@@ -16,7 +16,7 @@ use crate::context_menu::{Item, Target};
 use crate::ui_kit;
 
 #[path = "point_cloud_tracks.rs"]
-mod point_cloud_tracks;
+pub(crate) mod point_cloud_tracks;
 #[path = "range_track.rs"]
 mod range_track;
 use point_cloud_tracks::{Ask, Paint, Tracks};
@@ -281,7 +281,7 @@ pub(crate) fn panel(app: &mut SolveApp, ctx: &egui::Context) {
     // label changes.
     let live = crate::point_clouds::as_drawn(&c, |k| m.playing(c.id, k)).into_owned();
     let drawn: Vec<Filter> = live.filters.iter().take(DRAWN_FILTERS).cloned().collect();
-    let paint = match (c.colored_property(), live.color_range()) {
+    let paint = match (c.colored_property(), crate::point_clouds::color_range(ctx, &live)) {
         (Some(n), _) if c.cells.integer(n) => Paint::Palette { property: n.to_string() },
         (Some(n), Some(range)) => Paint::Ramp { property: n.to_string(), range },
         _ => Paint::One,
@@ -359,11 +359,11 @@ pub(crate) fn panel(app: &mut SolveApp, ctx: &egui::Context) {
                         // A ramp over what is shown, unless its range is set.
                         let automatic = c.height_range.is_none();
                         if ui_kit::checkbox_row(ui, "point_cloud_auto_range", crate::i18n::tr("ui.point_cloud_auto_range"), automatic) {
-                            edit = Some(json!({ "cloud": c.id, "color_range": if automatic { json!(c.color_range()) } else { Value::Null } }));
+                            edit = Some(json!({ "cloud": c.id, "color_range": if automatic { json!(crate::point_clouds::color_range(ui.ctx(), &live)) } else { Value::Null } }));
                         }
                         // The ramp's range is a range on a track of the property, over what the
                         // filters keep; a double click beside it gives it back to the filters.
-                        let shown = live.color_range().unwrap_or(span);
+                        let shown = crate::point_clouds::color_range(ui.ctx(), &live).unwrap_or(span);
                         let key = colour_key(c.id);
                         let ask = Ask {
                             property: name.to_string(),

@@ -4183,7 +4183,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
             back: proj.cam.back().to_f32(),
             size_px,
             images: crate::ref_images::gpu_images(app),
-            clouds: crate::point_clouds::gpu_clouds(app),
+            clouds: crate::point_clouds::gpu_clouds(app, ui.ctx()),
             analysis: analysis_uniform(app),
             analysis_colors: crate::gpu::analysis_colors(&t.analysis),
             access: crate::access::map(app),

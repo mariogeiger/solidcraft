@@ -1,7 +1,8 @@
 //! What the Edit Point Cloud card's range tracks draw, worked out off the frame: each track's
 //! bars over the whole span and over its loupe, and the values its ends snap to. A track asks
 //! every frame; a worker thread answers the newest asks (on the web, where there are no threads,
-//! they are answered at once), and until then the track shows its last answer.
+//! they are answered at once), and until then the track shows its last answer. The view asks too,
+//! for the values the coloured property takes over what is kept: the ramp's automatic range.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
@@ -18,7 +19,7 @@ const RAMP_BANDS: usize = 32;
 
 /// How a track's bars are coloured.
 #[derive(Clone, Debug, PartialEq)]
-pub(super) enum Paint {
+pub(crate) enum Paint {
     /// One colour.
     One,
     /// The ramp over `range` of `property`; painted at each value when the track is that property.
@@ -30,7 +31,7 @@ pub(super) enum Paint {
 /// What a track asks for: its property's bars over the whole span and over the loupe, in `bins`
 /// bins each, over what `filters` keep; and the values where `changes_of` changes along it.
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct Ask {
+pub(crate) struct Ask {
     pub property: String,
     pub span: [f64; 2],
     pub loupe: [f64; 2],
@@ -42,10 +43,12 @@ pub(super) struct Ask {
 
 /// A track's answer.
 #[derive(Clone, Debug, Default)]
-pub(super) struct Answer {
-    pub overview: Bars,
-    pub loupe: Bars,
-    pub changes: Arc<Vec<f64>>,
+pub(crate) struct Answer {
+    pub(super) overview: Bars,
+    pub(super) loupe: Bars,
+    pub(super) changes: Arc<Vec<f64>>,
+    /// The least and the greatest value the property takes over what is kept.
+    pub extent: Option<[f64; 2]>,
 }
 
 /// The cloud's data as far as the tracks are concerned: its points, cells, columns and placement.
@@ -92,11 +95,12 @@ impl Prepared {
             Paint::One => (Colour::One, vec![plain()], None),
         };
         let bars = |axis: [f64; 2]| {
-            let slots = histogram(c, &geometry, &ask.property, axis, ask.bins, &colour, &ask.filters).map(|h| h.slots).unwrap_or_default();
-            Bars { axis, slots, colours: colours.clone(), ramp }
+            let h = histogram(c, &geometry, &ask.property, axis, ask.bins, &colour, &ask.filters);
+            let extent = h.as_ref().and_then(|h| h.extent);
+            (Bars { axis, slots: h.map(|h| h.slots).unwrap_or_default(), colours: colours.clone(), ramp }, extent)
         };
-        let overview = bars(ask.span);
-        let loupe = if ask.loupe == ask.span { overview.clone() } else { bars(ask.loupe) };
+        let (overview, extent) = bars(ask.span);
+        let loupe = if ask.loupe == ask.span { overview.clone() } else { bars(ask.loupe).0 };
         let changes = match &ask.changes_of {
             Some(label) => self
                 .changes
@@ -105,7 +109,7 @@ impl Prepared {
                 .clone(),
             None => Arc::default(),
         };
-        Answer { overview, loupe, changes }
+        Answer { overview, loupe, changes, extent }
     }
 }
 
@@ -144,7 +148,7 @@ impl std::fmt::Debug for Tracks {
 impl Tracks {
     /// The last answer to the track `key` (maybe to an older ask), asking `ask` of `cloud` when
     /// that is new.
-    pub(super) fn answer(&self, ctx: &egui::Context, cloud: &PointCloud, key: &str, ask: Ask) -> Option<Arc<Answer>> {
+    pub(crate) fn answer(&self, ctx: &egui::Context, cloud: &PointCloud, key: &str, ask: Ask) -> Option<Arc<Answer>> {
         let Ok(mut inner) = self.shared.inner.lock() else { return None };
         let data = data_key(cloud);
         if inner.cloud.as_ref().is_none_or(|(k, _)| *k != data) {

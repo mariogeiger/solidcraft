@@ -121,3 +121,24 @@ fn labels_change_where_the_next_element_has_another() {
     assert_eq!(label_changes(&c, &g, "layer", "t"), vec![2.0, 4.0]);
     assert!(label_changes(&c, &g, "nope", "t").is_empty());
 }
+
+#[test]
+fn the_automatic_range_is_what_every_filter_keeps() {
+    // t runs 0 to 10 along x; filtered by x from 2 to 4, coloured by t: the range is 2 to 4,
+    // though no filter is on t (its span within filters on t would be 0 to 10).
+    let mut c = cloud(&[[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [20.0, 0.0, 0.0]], &[0, 1], &[], vec![column("t", On::Point, false, &[0.0, 10.0, 7.0])]);
+    c.color_by = ColorBy::Property;
+    c.color_property = Some("t".into());
+    let g = Geometry::of(&c);
+    let x = [range("x", [2.0, 4.0])];
+    assert_eq!(c.color_range(), Some([0.0, 10.0]));
+    assert_eq!(color_range(&c, &g, &x), Some([2.0, 4.0]));
+    // The dot at x = 20 is kept by nothing; by itself it would be one value, one unit wide.
+    assert_eq!(color_range(&c, &g, &[range("x", [19.0, 21.0])]), Some([6.5, 7.5]));
+    // Nothing kept: the cloud's own bound; a range set is kept as it is.
+    assert_eq!(color_range(&c, &g, &[range("x", [50.0, 60.0])]), Some([0.0, 10.0]));
+    c.height_range = Some([1.0, 2.0]);
+    assert_eq!(color_range(&c, &g, &x), Some([1.0, 2.0]));
+    let h = histogram(&c, &g, "t", [0.0, 1.0], 4, &Colour::One, &x).unwrap();
+    assert_eq!(h.extent, Some([2.0, 4.0]), "the extent reaches past the axis");
+}

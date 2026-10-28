@@ -268,8 +268,10 @@ impl PointCloud {
         let v = self.world_corners()?.map(|p| [p.x, p.y, p.z][k]);
         Some([v.iter().copied().fold(f64::INFINITY, f64::min), v.iter().copied().fold(f64::NEG_INFINITY, f64::max)])
     }
-    /// The ramp's range: the one set, or else what is shown of the coloured property, its span
-    /// within every range filtering it.
+    /// The ramp's range as far as it can be told without the elements: the one set, or else the
+    /// coloured property's span within every range filtering it. The automatic range colouring
+    /// by a property is exactly what the filters keep
+    /// ([`crate::point_cloud_distribution::color_range`]), which this bounds.
     pub fn color_range(&self) -> Option<[f64; 2]> {
         if self.height_range.is_some() {
             return self.height_range;
@@ -278,11 +280,7 @@ impl PointCloud {
         let span = if self.color_by == ColorBy::Height { self.auto_height_range() } else { self.span(property) }?;
         let shown =
             self.filters.iter().filter(|f| f.property == property).filter_map(Filter::range).fold(span, |[lo, hi], [a, b]| [lo.max(a), hi.min(b)]);
-        Some(match shown {
-            [lo, hi] if lo < hi => [lo, hi],
-            [lo, hi] if lo == hi => [lo - 0.5, hi + 0.5],
-            _ => span,
-        })
+        Some(if shown[0] <= shown[1] { crate::point_cloud_distribution::ramp_range(shown) } else { span })
     }
     /// Points no segment or triangle ends on: those drawn as dots.
     pub fn isolated_points(&self) -> usize {
@@ -301,11 +299,10 @@ impl PointCloud {
     pub fn height_range_now(&self) -> Option<[f64; 2]> {
         self.height_range.or_else(|| self.auto_height_range())
     }
-    /// The colour of each point (by index) as the cloud is shown.
-    pub fn shade(&self) -> impl Fn(usize) -> [u8; 3] + '_ {
+    /// The colour of each point (by index) as the cloud is shown, the ramp over `range`.
+    pub fn shade(&self, range: Option<[f64; 2]>) -> impl Fn(usize) -> [u8; 3] + '_ {
         let single = self.color.unwrap_or(PLAIN).map(byte);
         let plain = PLAIN.map(byte);
-        let range = self.color_range();
         let column = self.color_property.as_deref().and_then(|n| self.cells.column(n, On::Point));
         move |i| match self.color_by {
             ColorBy::File => self.colors.get(i).unwrap_or(plain),
@@ -630,26 +627,26 @@ mod tests {
         let colors: Vec<u8> = (0..102).flat_map(|i| [i as u8, 7, 9]).collect();
         let mut c = cloud(values, colors);
         c.origin = Vec3::ZERO;
-        assert_eq!(c.shade()(3), [3, 7, 9], "the file's colours");
+        assert_eq!(c.shade(c.color_range())(3), [3, 7, 9], "the file's colours");
         c.colors = Colors::default();
-        assert_eq!(c.shade()(3), PLAIN.map(byte), "none: plain");
+        assert_eq!(c.shade(c.color_range())(3), PLAIN.map(byte), "none: plain");
         c.color_by = ColorBy::Single;
         c.color = Some([1.0, 0.5, 0.0]);
-        assert_eq!(c.shade()(50), [255, 128, 0]);
+        assert_eq!(c.shade(c.color_range())(50), [255, 128, 0]);
         // The stray point doesn't stretch the automatic range.
         c.color_by = ColorBy::Height;
         // 102 points: the 2nd and the 99th (of 0…101) once sorted.
         assert_eq!(c.auto_height_range(), Some([2.0, 99.0]));
         {
-            let shade = c.shade();
+            let shade = c.shade(c.color_range());
             assert_eq!((shade(0), shade(100), shade(101)), (height_ramp(0.0), height_ramp(1.0), height_ramp(1.0)));
             assert_eq!(shade(50), height_ramp(48.0 / 97.0));
         }
         // A range of its own; moved up 100 mm, everything is above it.
         c.height_range = Some([0.0, 50.0]);
-        assert_eq!(c.shade()(25), height_ramp(0.5));
+        assert_eq!(c.shade(c.color_range())(25), height_ramp(0.5));
         c.transform[3][2] = 100.0;
-        assert_eq!(c.shade()(0), height_ramp(1.0));
+        assert_eq!(c.shade(c.color_range())(0), height_ramp(1.0));
         assert_eq!((height_ramp(0.0), height_ramp(1.0), height_ramp(f64::NAN)), ([40, 70, 200], [230, 70, 50], [40, 70, 200]));
         let back: PointCloud = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
         assert_eq!(back, c);
