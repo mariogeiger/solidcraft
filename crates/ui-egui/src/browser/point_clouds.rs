@@ -261,6 +261,7 @@ pub(crate) fn panel(app: &mut SolveApp, ctx: &egui::Context) {
         return;
     };
     let mut edit: Option<Value> = None;
+    let mut reload = false;
     let title = crate::i18n::format("browser.edit_point_cloud_title", &[("name", &c.name)]);
     let auto = if c.color_by == ColorBy::Height { m.auto_range(&c) } else { None };
     let dots = m.dots(&c);
@@ -531,6 +532,9 @@ pub(crate) fn panel(app: &mut SolveApp, ctx: &egui::Context) {
             if changed {
                 edit = Some(json!({ "cloud": c.id, "filters": filters_json(&filters) }));
             }
+            if !c.source.is_empty() && ui_kit::button(ui, crate::i18n::tr_label("Reload from file"), ui_kit::Button::Normal).clicked() {
+                reload = true;
+            }
         });
     // A filter that stops playing is written where it stopped.
     if stop_play && let Some(p) = m.play.take() {
@@ -539,6 +543,9 @@ pub(crate) fn panel(app: &mut SolveApp, ctx: &egui::Context) {
             f.keep = Keep::Range { range: p.now };
             edit = Some(json!({ "cloud": c.id, "filters": filters_json(&filters) }));
         }
+    }
+    if reload {
+        let _ = app.run("pointcloud.reload", json!({ "cloud": c.id }));
     }
     if let Some(p) = edit
         && app.run("pointcloud.edit", p).is_ok()
