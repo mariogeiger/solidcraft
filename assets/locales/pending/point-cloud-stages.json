@@ -1,6 +1,7 @@
 {
   "en": {
     "ui.point_cloud_add_filter": "Add filter…",
+    "ui.point_cloud_dots": "Dots",
     "ui.point_cloud_filter_by": "Filter by",
     "ui.point_cloud_legend_filter": "Shown and hidden in the legend above",
     "ui.point_cloud_pause": "Pause",
@@ -8,6 +9,7 @@
   },
   "fr": {
     "ui.point_cloud_add_filter": "Ajouter un filtre…",
+    "ui.point_cloud_dots": "Points isolés",
     "ui.point_cloud_filter_by": "Filtrer par",
     "ui.point_cloud_legend_filter": "Affichées et masquées dans la légende ci-dessus",
     "ui.point_cloud_pause": "Pause",
@@ -15,6 +17,7 @@
   },
   "de": {
     "ui.point_cloud_add_filter": "Filter hinzufügen…",
+    "ui.point_cloud_dots": "Einzelpunkte",
     "ui.point_cloud_filter_by": "Filtern nach",
     "ui.point_cloud_legend_filter": "In der Legende oben ein- und ausgeblendet",
     "ui.point_cloud_pause": "Pause",
@@ -22,6 +25,7 @@
   },
   "ja": {
     "ui.point_cloud_add_filter": "フィルターを追加…",
+    "ui.point_cloud_dots": "単独の点",
     "ui.point_cloud_filter_by": "フィルター",
     "ui.point_cloud_legend_filter": "上の凡例で表示・非表示を切り替え",
     "ui.point_cloud_pause": "一時停止",
@@ -29,6 +33,7 @@
   },
   "zh": {
     "ui.point_cloud_add_filter": "添加筛选…",
+    "ui.point_cloud_dots": "独立点",
     "ui.point_cloud_filter_by": "筛选依据",
     "ui.point_cloud_legend_filter": "在上方图例中显示或隐藏",
     "ui.point_cloud_pause": "暂停",
@@ -36,6 +41,7 @@
   },
   "ar": {
     "ui.point_cloud_add_filter": "إضافة مرشح…",
+    "ui.point_cloud_dots": "نقاط منفردة",
     "ui.point_cloud_filter_by": "التصفية حسب",
     "ui.point_cloud_legend_filter": "تُعرض وتُخفى في وسيلة الإيضاح أعلاه",
     "ui.point_cloud_pause": "إيقاف مؤقت",
@@ -43,6 +49,7 @@
   },
   "he": {
     "ui.point_cloud_add_filter": "הוספת מסנן…",
+    "ui.point_cloud_dots": "נקודות בודדות",
     "ui.point_cloud_filter_by": "סינון לפי",
     "ui.point_cloud_legend_filter": "מוצגים ומוסתרים במקרא שלמעלה",
     "ui.point_cloud_pause": "השהיה",
@@ -50,6 +57,7 @@
   },
   "vi": {
     "ui.point_cloud_add_filter": "Thêm bộ lọc…",
+    "ui.point_cloud_dots": "Điểm đơn lẻ",
     "ui.point_cloud_filter_by": "Lọc theo",
     "ui.point_cloud_legend_filter": "Hiện và ẩn trong chú giải ở trên",
     "ui.point_cloud_pause": "Tạm dừng",
