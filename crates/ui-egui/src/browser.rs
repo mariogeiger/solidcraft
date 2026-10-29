@@ -24,6 +24,7 @@ mod model;
 mod features;
 mod point_clouds;
 pub use point_clouds::CloudPanel;
+pub(crate) use point_clouds::point_cloud_tracks;
 
 pub(crate) fn reveal_feature(app: &mut SolveApp, id: u64, body: &str) {
     features::reveal(app, id, body);

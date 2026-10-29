@@ -923,6 +923,36 @@ pub(crate) fn number_fields<T: egui::emath::Numeric>(
         .collect()
 }
 
+/// A number on a range track, without unit: dragged `speed` a point, shown with `decimals`, typed
+/// as a sum of numbers (`relative_number`).
+/// Tokens: scope control/font tokens. Values are caller data.
+pub(crate) fn track_number(ui: &mut Ui, value: &mut f64, speed: f64, decimals: usize) -> Response {
+    let now = *value;
+    let response = ui.add(egui::DragValue::new(value).speed(speed).fixed_decimals(decimals).custom_parser(move |s| relative_number(s, now)));
+    Tokens::get().input_bevel(ui, &response);
+    super::layout::publish_geometry(ui, &response);
+    response
+}
+
+/// A value typed as a sum of numbers (`crate::prefs::parse_number` each), added to `now` when it
+/// starts with a sign: "+30" moves the value by 30, "0-5" is −5.
+fn relative_number(text: &str, now: f64) -> Option<f64> {
+    let text: String = text.chars().filter(|c| !c.is_whitespace()).map(|c| if c == '\u{2212}' { '-' } else { c }).collect();
+    let mut total = if text.starts_with(['+', '-']) { now } else { 0.0 };
+    let mut term = String::new();
+    let mut prev = ' ';
+    for c in text.chars() {
+        if (c == '+' || c == '-') && !term.is_empty() && !matches!(prev, 'e' | 'E') {
+            total += crate::prefs::parse_number(&term)?;
+            term.clear();
+        }
+        term.push(c);
+        prev = c;
+    }
+    total += crate::prefs::parse_number(&term)?;
+    total.is_finite().then_some(total)
+}
+
 /// Growing plain-text message editor; its parent owns scrolling and Enter routing.
 /// Tokens: control_fill, form_inset, font_label. Use text_area for bounded data input.
 #[cfg(any(not(target_arch = "wasm32"), test))]

@@ -295,6 +295,39 @@ pub(crate) fn pinch_factor(input: &egui::InputState, options: egui::InputOptions
     factor
 }
 
+/// The wheel and pinch of this frame for a widget that zooms and moves along one axis itself (a
+/// range track), claimed so that nothing under it moves as well: the wheel's vertical points
+/// (zoom), its sideways points (the content moves by them) and the pinch factor. Units and
+/// modifier routing are egui's, as for the camera.
+pub(crate) fn axis_wheel(ctx: &egui::Context, page_height: f32) -> (f32, f32, f32) {
+    let options = ctx.options(|o| o.input_options);
+    let (zoom, sideways, pinch) = ctx.input(|i| {
+        let (mut zoom, mut sideways) = (0.0, 0.0);
+        for event in &i.events {
+            let egui::Event::MouseWheel { unit, delta, modifiers, phase } = event else { continue };
+            if *phase != egui::TouchPhase::Move || modifiers.matches_any(options.zoom_modifier) {
+                continue;
+            }
+            let points = match unit {
+                egui::MouseWheelUnit::Point => *delta,
+                egui::MouseWheelUnit::Line => *delta * options.line_scroll_speed,
+                egui::MouseWheelUnit::Page => *delta * page_height,
+            };
+            let up = route_wheel_vertical(points, *modifiers, options);
+            zoom += up;
+            sideways += if up == 0.0 { points.x + points.y } else { points.x };
+        }
+        // A zoom-modified wheel, skipped above, zooms the track once, as a pinch: no chosen
+        // trackpad modifier turns it into anything else here.
+        (zoom, sideways, pinch_factor(i, options, page_height, None))
+    });
+    let (zoom, sideways) = (if zoom.is_finite() { zoom } else { 0.0 }, if sideways.is_finite() { sideways } else { 0.0 });
+    if zoom != 0.0 || sideways != 0.0 || pinch != 1.0 {
+        claim_wheel(ctx);
+    }
+    (zoom, sideways, pinch)
+}
+
 /// Give this frame's wheel to the widget under the pointer that uses it itself (a value field
 /// stepping its number, `value_step`): no scroll area or camera under it moves as well.
 pub(crate) fn claim_wheel(ctx: &egui::Context) {
