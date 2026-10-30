@@ -279,6 +279,11 @@ pub(super) fn interface(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                         let check = setting::status_bar(app, ui).on_hover_text(app.tr("prefs.status_bar_note"));
                         crate::scenario::publish_target("prefs:status_bar", check.rect);
                     });
+                    // The selection's measurement in the view's corner (#7000).
+                    ui_kit::row(ui, "", |ui| {
+                        let check = setting::quick_measure(app, ui).on_hover_text(app.tr("prefs.quick_measure_note"));
+                        crate::scenario::publish_target("prefs:quick_measure", check.rect);
+                    });
                     ui_kit::text(ui, app.tr("prefs.layout_note"), ui_kit::Text::Hint("layout"));
                     ui_kit::text(ui, app.tr("prefs.history_sketches_note"), ui_kit::Text::Hint("history_sketches"));
                     ui_kit::LayoutPreview {

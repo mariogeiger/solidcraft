@@ -1785,6 +1785,8 @@
   "parts.family.set_screw": "Stelschroef met inbus, vlakke punt",
   "parts.family.socket_head_cap_screw": "Cilinderkopschroef met inbus",
   "parts.family.washer": "Vlakke onderlegring",
+  "parts.holes": "Gaten (optioneel)",
+  "parts.placement_hint": "kies een of meer gaten om in elk een onderdeel te plaatsen, of OK plaatst het in de oorsprong",
   "pattern.alignment_2": "Uitlijning 2",
   "pattern.alignment_hint": "Aantallen omvatten het origineel. Gecentreerd verdeelt kopieën gelijkmatig; Omkeren kiest de extra zijde bij even totalen.",
   "pattern.direction_1": "Richting 1",

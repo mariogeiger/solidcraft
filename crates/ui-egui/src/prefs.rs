@@ -1095,6 +1095,9 @@ preference_settings! {
     /// A thin bar along the window's bottom edge: what is being edited, the open sketch's state
     /// and the design's units (#7243). Off by default.
     status_bar: bool = false, PAGE_INTERFACE => check_id("prefs.status_bar");
+    /// The selection's length, area or distance in the view's bottom right corner (#7000). Off by
+    /// default.
+    quick_measure: bool = false, PAGE_INTERFACE => check_id("prefs.quick_measure");
     /// Put the feature history to the left of the browser instead of below the viewport.
     timeline_left: bool = false, PAGE_INTERFACE;
     /// Measured outer width; the contents react to this width without a names mode.
@@ -5036,6 +5039,7 @@ mod tests {
             ("view_confirm_corner", json!(true), PAGE_INTERFACE),
             ("status_bar", json!(true), PAGE_INTERFACE),
             ("browser_eye_left", json!(true), PAGE_INTERFACE),
+            ("quick_measure", json!(true), PAGE_INTERFACE),
             ("nav", json!("blender"), PAGE_NAVIGATION),
             ("look_at_anim", json!(false), PAGE_NAVIGATION),
             ("selection_shift_add_only", json!(true), PAGE_SKETCH),
