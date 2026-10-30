@@ -216,6 +216,53 @@ fn project_edges_bodies_sketches_and_origin() {
     assert!(s.execute("sketch.project", &json!({"refs": [{"plane": "XY"}]})).is_err(), "parallel plane projects to nothing");
 }
 
+/// A construction axis projects as an origin axis does, as its line in the sketch plane, and stays
+/// linked to it: the projection follows when the axis moves and when it is renamed. The report's
+/// steps (#9324): the axis made after the sketch, then moved before it.
+#[test]
+fn a_construction_axis_projects_and_stays_linked() {
+    let mut s = Session::default();
+    let sketch = run(&mut s, "sketch.create", json!({"plane": "XY"}))["sketch"].as_u64().unwrap();
+    run(&mut s, "sketch.finish", json!({}));
+    let axis = |x: f64| json!({"a": {"point": [x, 0, 0]}, "b": {"point": [x, 30, 0]}, "name": "Axis1"});
+    run(&mut s, "construct.axis.two_points", axis(10.0));
+    run(&mut s, "timeline.reorder", json!({"feature": "Axis1", "position": 0}));
+    run(&mut s, "sketch.edit", json!({"sketch": sketch}));
+    let r = run(&mut s, "sketch.project", json!({"refs": [{"axis": "Axis1"}]}));
+    let line = r["links"][0]["curves"][0].clone();
+    // Where the projected line runs: its two ends' x, and its length along y.
+    let at = |s: &mut Session| {
+        run(s, "sketch.edit", json!({"sketch": sketch}));
+        let si = inspect(s);
+        let c = si["curves"].as_array().unwrap().iter().find(|c| c["id"] == line).cloned().unwrap();
+        run(s, "sketch.finish", json!({}));
+        let n = |v: &Value| v.as_f64().unwrap();
+        (n(&c["start_at"][0]), n(&c["end_at"][0]), (n(&c["end_at"][1]) - n(&c["start_at"][1])).abs())
+    };
+    run(&mut s, "sketch.finish", json!({}));
+    let (x0, x1, length) = at(&mut s);
+    assert!((x0 - 10.0).abs() < 1e-9 && (x1 - 10.0).abs() < 1e-9 && length > 30.0, "{x0} {x1} {length}");
+    run(&mut s, "timeline.redefine", json!({"feature": "Axis1", "command": "construct.axis.two_points", "params": axis(25.0)}));
+    let (x0, x1, _) = at(&mut s);
+    assert!((x0 - 25.0).abs() < 1e-9 && (x1 - 25.0).abs() < 1e-9, "the projection follows the axis: {x0} {x1}");
+    run(&mut s, "timeline.rename", json!({"feature": "Axis1", "name": "Hinge axis"}));
+    let state = s.model.state();
+    let link = &state.sketch(sketch).unwrap().sketch.links[0];
+    assert_eq!(link.source, solidcraft_sketch::LinkSource::Axis { name: "Hinge axis".into() });
+    assert!(!link.lost, "renamed, the axis is still found");
+    // A design with the axis after the sketch opens with the link lost, saying why.
+    run(&mut s, "timeline.reorder", json!({"feature": "Hinge axis", "position": 1}));
+    let opened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    assert!(opened.model.state().sketch(sketch).unwrap().sketch.links[0].lost);
+    let warnings = opened.model.result(sketch).and_then(|r| r.warning.clone()).unwrap_or_default();
+    assert!(warnings.contains("it must come earlier in the timeline"), "{warnings}");
+    run(&mut s, "timeline.reorder", json!({"feature": "Hinge axis", "position": 0}));
+    // An axis that is no origin axis and no construction axis is refused, by its name.
+    run(&mut s, "sketch.edit", json!({"sketch": sketch}));
+    let error = s.execute("sketch.project", &json!({"refs": [{"axis": "Axis9"}]})).unwrap_err().to_string();
+    assert!(error.contains("unknown axis `Axis9`"), "{error}");
+}
+
 #[test]
 fn project_whole_body_can_create_unlinked_geometry() {
     let mut s = Session::default();

@@ -1783,6 +1783,8 @@
   "parts.family.set_screw": "Grano a esagono incassato, punta piana",
   "parts.family.socket_head_cap_screw": "Vite a testa cilindrica con esagono incassato",
   "parts.family.washer": "Rondella piana",
+  "parts.holes": "Fori (facoltativo)",
+  "parts.placement_hint": "scegli uno o più fori per alloggiare una parte in ciascuno, oppure OK la colloca nell'origine",
   "pattern.alignment_2": "Allineamento 2",
   "pattern.alignment_hint": "Il conteggio include l'originale. Centro distribuisce le copie sui due lati; Inverti sceglie il lato con la copia in più per totali pari.",
   "pattern.direction_1": "Direzione 1",

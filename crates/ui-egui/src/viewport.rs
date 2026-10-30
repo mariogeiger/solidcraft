@@ -4939,7 +4939,9 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     crate::viewport_status::show(app, ui.ctx(), rect);
     crate::viewport_status_fixture::show(app, ui.ctx(), rect);
     // The notices and the agent chip first, so the 3D mouse picture can keep clear of them.
-    let toasts = transient_messages(app, ui, rect);
+    // The selection's measurement in the corner, before the notices so they keep clear of it.
+    let readout = quick_measure_readout(app, ui, rect);
+    let toasts = transient_messages(app, ui, rect, readout);
     if app.preferences.space_mouse_in_view
         && app.space_mouse.calibrating.is_none()
         && let Some(device) = &app.space_mouse.device
@@ -5042,9 +5044,21 @@ fn agent_chip(app: &mut SolveApp, ui: &egui::Ui, view: Rect, taken: &[Rect]) -> 
 /// How long a status message stays in the view (milliseconds).
 const STATUS_TOAST_MS: f64 = 6000.0;
 
+/// The selection's measurement in the view's bottom right corner (`quick_measure`), clear of the
+/// panels and cards over the view and its navigation bar.
+fn quick_measure_readout(app: &mut SolveApp, ui: &egui::Ui, viewport: Rect) -> Option<Rect> {
+    crate::quick_measure::poll(app, ui.ctx());
+    let mut taken = crate::shell::covered_rects(app);
+    if let Some(layout) = &app.viewport.layout {
+        taken.extend([layout.navigation, layout.axis_view]);
+    }
+    let view = crate::shell::content_rect(app, viewport);
+    crate::quick_measure::show(app, ui, view, &taken)
+}
+
 /// A single visual pattern for ongoing work, the existing six-second status, the 3D mouse
 /// calibration offer and the stand-up note, stacked from the bottom of the free view. Returns the toasts' rects.
-pub(crate) fn transient_messages(app: &mut SolveApp, ui: &egui::Ui, viewport: Rect) -> Vec<Rect> {
+pub(crate) fn transient_messages(app: &mut SolveApp, ui: &egui::Ui, viewport: Rect, readout: Option<Rect>) -> Vec<Rect> {
     let placement_hint =
         app.tool.as_ref().filter(|tool| matches!(tool.cmd, "canvas.insert" | "canvas.decal")).map(|tool| crate::tools::hint(tool.cmd));
     // Nothing to show or time: an idle window skips the layout. The offer is checked too, as its clock
@@ -5064,6 +5078,7 @@ pub(crate) fn transient_messages(app: &mut SolveApp, ui: &egui::Ui, viewport: Re
     if let Some(layout) = &app.viewport.layout {
         obstacles.extend([layout.navigation, layout.axis_view]);
     }
+    obstacles.extend(readout);
     let view = crate::shell::content_rect(app, viewport);
     let mut free = crate::viewport_layout::free_rect(view, &obstacles).shrink(t.space_8);
     if ToastPlace::current(ui.ctx()) == ToastPlace::Corner {

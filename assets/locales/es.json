@@ -1591,6 +1591,8 @@
   "parts.family.set_screw": "Prisionero con hexágono interior, punta plana",
   "parts.family.socket_head_cap_screw": "Tornillo cilíndrico con hexágono interior",
   "parts.family.washer": "Arandela plana",
+  "parts.holes": "Agujeros (opcional)",
+  "parts.placement_hint": "elija uno o más agujeros para asentar una pieza en cada uno, o Aceptar la coloca en el origen",
   "pattern.alignment_2": "Alineación 2",
   "pattern.alignment_hint": "Los recuentos incluyen el original. Centrar equilibra las copias; Invertir elige el lado adicional cuando el total es par.",
   "pattern.direction_1": "Dirección 1",

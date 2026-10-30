@@ -208,6 +208,9 @@ mod primitive_placement;
 #[cfg(test)]
 mod primitive_units_tests;
 mod print_face_ui;
+pub(crate) mod quick_measure;
+#[cfg(test)]
+mod quick_measure_tests;
 pub mod recovery_ui;
 pub mod ref_images;
 mod render_ui;
@@ -258,6 +261,7 @@ mod sketch_modify_ui_tests;
 mod sketch_moving_click_tests;
 pub mod sketch_palette;
 mod sketch_pattern_tree;
+pub mod sketch_report;
 #[cfg(test)]
 mod sketch_side_ui_tests;
 mod sketch_state;
@@ -505,6 +509,8 @@ pub struct SolveApp {
     pub params: Option<params_dialog::ParamsDialog>,
     /// The Design Properties window, when open.
     pub design_properties: Option<design_properties::DesignProperties>,
+    /// The Sketch report window (`sketch.inspect` from the ribbon), when open.
+    pub sketch_report: Option<sketch_report::SketchReport>,
     /// The Bill of Materials window, when open.
     pub bom: Option<bom_panel::BomPanel>,
     material_card_review: Option<material_card_review::ReviewWindow>,
@@ -611,6 +617,8 @@ pub struct SolveApp {
     pub recoverable: Vec<solidcraft_engine::recovery::Entry>,
     /// Discard all was clicked in the recovery window: its confirmation is showing (#9299).
     pub recovery_discard_all: bool,
+    /// The selection's measurement in the view's corner (#7000).
+    pub(crate) quick_measure: quick_measure::QuickMeasure,
     /// The bodies of a just-opened Y-up file, offered to be stood up (`stand_up`).
     pub stand_up: Option<Vec<String>>,
     /// The placement of the component that file came in as: the offer turns it.
@@ -748,6 +756,7 @@ impl SolveApp {
             dialog: None,
             params: None,
             design_properties: None,
+            sketch_report: None,
             bom: None,
             material_card_review: None,
             menu: context_menu::MenuState::default(),
@@ -802,6 +811,7 @@ impl SolveApp {
             network_prompt: None,
             recoverable: Vec::new(),
             recovery_discard_all: false,
+            quick_measure: Default::default(),
             stand_up: None,
             stand_up_occurrence: None,
             stand_up_reason: false,
@@ -1728,6 +1738,10 @@ impl SolveApp {
         }
         if matches!(id, "document.metadata" | "document.metadata.set") {
             design_properties::open(self);
+            return;
+        }
+        if id == "sketch.inspect" {
+            sketch_report::open(self);
             return;
         }
         if id == "assembly.bom" {
@@ -2808,6 +2822,7 @@ impl SolveApp {
         self.resolve_fit(ui.ctx());
         params_dialog::show(self, ui.ctx());
         design_properties::show(self, ui.ctx());
+        sketch_report::show(self, ui.ctx());
         bom_panel::show(self, ui.ctx());
         material_card_review::show(self, ui.ctx());
         recovery_ui::show(self, ui.ctx());

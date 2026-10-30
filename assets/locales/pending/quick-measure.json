@@ -1,0 +1,50 @@
+{
+  "en": {
+    "measure.quick_copied": "Measurement copied",
+    "measure.quick_copy": "Click to copy the measurement",
+    "measure.quick_edges": "{count} edges",
+    "measure.quick_faces": "{count} faces",
+    "prefs.quick_measure": "Quick measurement in the view's corner",
+    "prefs.quick_measure_note": "The selection's size in the view's bottom right corner: an edge's length, or Ø and R for a round one, a face's area, a point's position, two items' distance and angle, several edges' or faces' total. A click copies it."
+  },
+  "ar": {
+    "measure.quick_copied": "تم نسخ القياس",
+    "measure.quick_copy": "انقر لنسخ القياس",
+    "measure.quick_edges": "{count} حواف",
+    "measure.quick_faces": "{count} أوجه",
+    "prefs.quick_measure": "قياس سريع في زاوية العرض",
+    "prefs.quick_measure_note": "يعرض مقاس العناصر المحددة في الزاوية اليمنى السفلية من العرض فوق السجل: طول الحافة (أو Ø وR للحافة الدائرية)، ومساحة الوجه، وموضع النقطة، والمسافة والزاوية بين عنصرين، ومجموع عدة حواف أو أوجه. النقر ينسخه."
+  },
+  "he": {
+    "measure.quick_copied": "המדידה הועתקה",
+    "measure.quick_copy": "לחיצה מעתיקה את המדידה",
+    "measure.quick_edges": "{count} מקצועות",
+    "measure.quick_faces": "{count} פאות",
+    "prefs.quick_measure": "מדידה מהירה בפינת התצוגה",
+    "prefs.quick_measure_note": "מציג את מידות הבחירה בפינה הימנית התחתונה של התצוגה, מעל ההיסטוריה: אורך מקצוע (או Ø ו-R למקצוע עגול), שטח פאה, מיקום נקודה, המרחק והזווית בין שני פריטים, והסכום של כמה מקצועות או פאות. לחיצה מעתיקה אותו."
+  },
+  "ja": {
+    "measure.quick_copied": "測定値をコピーしました",
+    "measure.quick_copy": "クリックで測定値をコピー",
+    "measure.quick_edges": "エッジ {count} 本",
+    "measure.quick_faces": "面 {count} 個",
+    "prefs.quick_measure": "ビューの隅にクイック測定",
+    "prefs.quick_measure_note": "選択したものの寸法をビューの右下、履歴の上に表示します: エッジの長さ（円形のものは Ø と R）、面の面積、点の位置、2 つの項目の距離と角度、複数のエッジや面の合計。クリックでコピーします。"
+  },
+  "vi": {
+    "measure.quick_copied": "Đã sao chép số đo",
+    "measure.quick_copy": "Nhấp để sao chép số đo",
+    "measure.quick_edges": "{count} cạnh",
+    "measure.quick_faces": "{count} mặt",
+    "prefs.quick_measure": "Đo nhanh ở góc khung nhìn",
+    "prefs.quick_measure_note": "Hiển thị kích thước của đối tượng được chọn ở góc dưới bên phải khung nhìn, phía trên Lịch sử: chiều dài của cạnh (hoặc Ø và R với cạnh tròn), diện tích của mặt, vị trí của điểm, khoảng cách và góc giữa hai đối tượng, tổng của nhiều cạnh hoặc mặt. Nhấp để sao chép."
+  },
+  "zh": {
+    "measure.quick_copied": "已复制测量值",
+    "measure.quick_copy": "点击复制测量值",
+    "measure.quick_edges": "{count} 条边",
+    "measure.quick_faces": "{count} 个面",
+    "prefs.quick_measure": "在视图角落显示快速测量",
+    "prefs.quick_measure_note": "在视图右下角、历史记录上方显示所选对象的尺寸：边的长度（圆形边显示 Ø 和 R）、面的面积、点的位置、两个对象之间的距离和角度、多条边或多个面的总和。点击即可复制。"
+  }
+}

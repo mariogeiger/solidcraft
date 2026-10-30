@@ -927,36 +927,7 @@ fn measure_rows(app: &SolveApp, ui: &mut egui::Ui, r: Option<&Value>, show: &mut
         });
     };
     for (i, it) in r["items"].as_array().into_iter().flatten().enumerate() {
-        // Round items: Ø first, then R, then the length (circumference, or the arc's length
-        // and angle).
-        let mut lines: Vec<String> = Vec::new();
-        if it.get("diameter").is_some() {
-            lines.push(format!("Ø  {}", mm(&it["diameter"])));
-            lines.push(format!("R  {}", mm(&it["radius"])));
-            if it.get("circumference").is_some() {
-                lines.push(format!("{}  {}", tr("Circumference"), mm(&it["circumference"])));
-            } else if let Some(a) = it["angle_deg"].as_f64() {
-                lines.push(format!("{}  {}", tr("Arc length"), mm(&it["arc_length"])));
-                lines.push(format!("{}  {a:.2}°", crate::i18n::tr_label("Angle")));
-            }
-        }
-        if let Some(sl) = it.get("slot") {
-            lines.push(format!("{}  {}", tr("Slot width"), mm(&sl["width"])));
-            lines.push(format!("{}  {}", tr("Centre to centre"), mm(&sl["center_distance"])));
-            lines.push(format!("{}  {}", tr("Overall length"), mm(&sl["overall_length"])));
-        }
-        let round = it.get("diameter").is_some();
-        match it["type"].as_str() {
-            Some("edge" | "sketch_curve") if !round => lines.push(format!("{}  {}", tr("Length"), mm(&it["length_mm"]))),
-            Some("face" | "profile") => {
-                lines.push(format!("{}  {}", tr("Area"), crate::prefs::show_mm(app, it["area_mm2"].as_f64().unwrap_or(0.0), 2)))
-            }
-            Some("vertex" | "sketch_point") => {
-                let p = &it["position"];
-                lines.push(format!("{}  {}, {}, {}", tr("measure.at"), mm(&p[0]), mm(&p[1]), mm(&p[2])));
-            }
-            _ => {}
-        }
+        let lines = crate::quick_measure::item_lines(app, it);
         for (k, line) in lines.into_iter().enumerate() {
             let label = if k == 0 { crate::i18n::format("measure.item", &[("number", &(i + 1).to_string())]) } else { String::new() };
             value(ui, &label, &line);
